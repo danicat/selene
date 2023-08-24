@@ -25,6 +25,8 @@ func usage() {
 }
 
 func main() {
+	log.SetOutput(io.Discard)
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(0)
@@ -38,6 +40,11 @@ func main() {
 		}
 
 		mutationDir = tmpDir
+	}
+
+	err := os.MkdirAll(mutationDir, os.ModePerm)
+	if err != nil {
+		log.Fatalf("failed to create mutation directory: %s", err)
 	}
 
 	log.Printf("mutation directory: %s", mutationDir)
@@ -61,11 +68,32 @@ func main() {
 		log.Fatalf("error running go test: %s", err)
 	}
 
+	testCount := 0
+	failed := 0
 	for _, test := range tests {
-		if test.Action == "pass" {
-			fmt.Printf("test %s passed: not affected by mutation", test.Test)
+		if test.Test == "" {
+			continue
+		}
+
+		switch test.Action {
+		case "run":
+			fmt.Printf("=== RUN   %s\n", test.Test)
+		case "pass":
+			testCount++
+			fmt.Printf("--- PASS: %s (%0.2fs) - MUTATION NOT CAUGHT\n", test.Test, test.Elapsed)
+		case "fail":
+			testCount++
+			failed++
+			fmt.Printf("--- FAIL: %s (%0.2fs) - MUTATION CAUGHT\n", test.Test, test.Elapsed)
 		}
 	}
+
+	if failed != testCount {
+		fmt.Printf("FAIL\n%d out of %d tests didn't catch any mutations\n", testCount-failed, testCount)
+		os.Exit(1)
+	}
+
+	fmt.Println("PASS")
 }
 
 type TestEvent struct {

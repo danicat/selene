@@ -11,8 +11,18 @@ Then we run `go test` using an overlay to replace the original files with the mu
 ## Running the experiment
 
 ```
-mkdir -p testdata/mutations
-go run main.go > testdata/mutations/cond.go
-cd testdata
-go test --overlay mutations/overlay.json .
+$ go build
+$ ./selene testdata/cond.go
+=== RUN   TestCond
+--- FAIL: TestCond (0.00s) - MUTATION CAUGHT
+=== RUN   TestFake
+--- PASS: TestFake (0.00s) - MUTATION NOT CAUGHT
+FAIL
+1 out of 2 tests didn't catch any mutations
+```
+
+You can also set GOMUTATION as directory for the output of the mutated files and overlay. If not specified selene will use a temporary directory.
+
+```
+$ GOMUTATION=./testdata/mutation ./selene testdata/cond.go
 ```
