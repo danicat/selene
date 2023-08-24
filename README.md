@@ -26,3 +26,7 @@ You can also set GOMUTATION as directory for the output of the mutated files and
 ```
 $ GOMUTATION=./testdata/mutation ./selene testdata/cond.go
 ```
+
+## Why Selene?
+
+Selene is the [oldest known human mutant](https://en.wikipedia.org/wiki/Selene_(comics)) in Marvel comics. It's also the name of the best protagonist of a vampire movie ever.
