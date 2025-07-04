@@ -1,4 +1,4 @@
-module github.com/danicat/selene
+module github.com/your-username/selene
 
 go 1.21
 

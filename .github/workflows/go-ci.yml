@@ -1,0 +1,66 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21' # Should match the version in go.mod
+
+      - name: Verify formatting
+        run: |
+          gofmt_output=$(gofmt -l .)
+          if [ -n "$gofmt_output" ]; then
+            echo "Go code is not formatted correctly. Please run 'gofmt -w .'"
+            echo "Files needing formatting:"
+            echo "$gofmt_output"
+            exit 1
+          fi
+          echo "Go code formatting is correct."
+
+      - name: Vet code
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -v -race ./... # -v for verbose output, -race to enable race detector
+
+      # Optional: Build the application if you have a main package to build
+      # - name: Build
+      #   run: go build -v -o selene-app ./... # Example: builds all binaries, adjust as needed
+      #   if: github.ref == 'refs/heads/main' # Example: only build on pushes to main
+      #
+      # Optional: Upload build artifact if built
+      # - name: Upload artifact
+      #   uses: actions/upload-artifact@v3
+      #   if: github.ref == 'refs/heads/main'
+      #   with:
+      #     name: selene-app-linux-amd64
+      #     path: selene-app # Path to your built binary
+      #     if-no-files-found: error # Fail if the artifact isn't found
+A GitHub Actions workflow file `.github/workflows/go-ci.yml` has been created.
+
+This workflow:
+*   Is named "Go CI".
+*   Triggers on pushes and pull requests to the `main` branch.
+*   Runs a single job named "Build and Test" on an `ubuntu-latest` runner.
+*   **Checks out code:** Uses `actions/checkout@v4`.
+*   **Sets up Go:** Uses `actions/setup-go@v5` with Go version '1.21' (matching `go.mod`).
+*   **Verifies formatting:** Runs `gofmt -l .` and fails if any files need formatting.
+*   **Vets code:** Runs `go vet ./...` for static analysis.
+*   **Runs tests:** Executes `go test -v -race ./...` to run all tests verbosely and with the race detector enabled.
+
+Optional build and artifact upload steps are commented out but can be enabled if the project produces a distributable binary.
+
+This CI setup will help ensure code quality, formatting consistency, and that tests pass before merging changes into the main branch.

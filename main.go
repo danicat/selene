@@ -1,191 +1,179 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/printer"
-	"go/token"
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
-	"time"
 
-	"golang.org/x/tools/go/ast/astutil"
+	"github.com/your-username/selene/mutator"
+	"github.com/your-username/selene/testrunner"
 )
 
-const GOMUTATION = "GOMUTATION"
+const GOMUTATION = "GOMUTATION" // Environment variable for specifying mutation directory
 
-func usage() {
-	fmt.Println("Usage:\nselene file.go")
+// MutationCreator defines the interface for creating mutations.
+type MutationCreator interface {
+	CreateMutations(filenames []string, mutationDir string) (string, error)
+}
+
+// TestExecutor defines the interface for running tests.
+type TestExecutor interface {
+	RunTests(pkgDir, overlayPath string) ([]testrunner.TestEvent, error)
+}
+
+func usage(out io.Writer) {
+	fmt.Fprintln(out, "Usage: selene <file.go> [file2.go ...]")
+	fmt.Fprintln(out, "\nEnvironment Variables:")
+	fmt.Fprintln(out, "  GOMUTATION: Specify a directory to store mutation files.")
+	fmt.Fprintln(out, "                If not set, a temporary directory will be created and removed.")
+	fmt.Fprintln(out, "  SELENE_KEEP_MUTATIONS: Set to any value to prevent deletion of the temporary mutation directory.")
+	fmt.Fprintln(out, "  SELENE_LOG_LEVEL: Set to DEBUG to enable verbose logging to stderr.")
+}
+
+// runApp encapsulates the core logic of the application.
+// It returns an error if the process should exit with a non-zero status, nil otherwise.
+func runApp(args []string, out io.Writer, mc MutationCreator, te TestExecutor) error {
+	if len(args) == 0 {
+		usage(out)
+		return fmt.Errorf("no input Go files provided")
+	}
+	inputFilenames := args
+
+	if inputFilenames[0] == "-h" || inputFilenames[0] == "--help" {
+		usage(out)
+		return nil // Successful exit for help
+	}
+
+	if os.Getenv("SELENE_LOG_LEVEL") == "DEBUG" {
+		log.SetOutput(os.Stderr)
+	} else {
+		log.SetOutput(io.Discard)
+	}
+
+	var actualMutationDir string
+	var tempDirCleanup func()
+
+	userSpecifiedMutationDir := os.Getenv(GOMUTATION)
+	if userSpecifiedMutationDir != "" {
+		actualMutationDir = userSpecifiedMutationDir
+		log.Printf("Using user-specified mutation directory: %s", actualMutationDir)
+		err := os.MkdirAll(actualMutationDir, 0755)
+		if err != nil {
+			return fmt.Errorf("failed to create or access user-specified mutation directory %s: %w", actualMutationDir, err)
+		}
+	} else {
+		tmpDir, err := os.MkdirTemp("", "selene-mutation-")
+		if err != nil {
+			return fmt.Errorf("error creating temp directory: %w", err)
+		}
+		actualMutationDir = tmpDir
+		log.Printf("Created temporary mutation directory: %s", actualMutationDir)
+		tempDirCleanup = func() {
+			if os.Getenv("SELENE_KEEP_MUTATIONS") == "" {
+				log.Printf("Removing temporary mutation directory: %s", tmpDir)
+				os.RemoveAll(tmpDir)
+			} else {
+				log.Printf("Keeping temporary mutation directory (SELENE_KEEP_MUTATIONS is set): %s", tmpDir)
+			}
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(out, "Panic occurred: %v. Temporary mutation dir kept at: %s\n", r, tmpDir)
+			} else if tempDirCleanup != nil {
+				tempDirCleanup()
+			}
+		}()
+	}
+
+	overlayPath, err := mc.CreateMutations(inputFilenames, actualMutationDir)
+	if err != nil {
+		return fmt.Errorf("error creating mutations: %w", err)
+	}
+	log.Printf("Overlay file created at: %s", overlayPath)
+
+	absPath, err := filepath.Abs(inputFilenames[0])
+	if err != nil {
+		return fmt.Errorf("error getting absolute path for %s: %w", inputFilenames[0], err)
+	}
+	pkgDir := filepath.Dir(absPath)
+	log.Printf("Running go test on package directory: %s", pkgDir)
+
+	testEvents, err := te.RunTests(pkgDir, overlayPath)
+	if err != nil {
+		return fmt.Errorf("error running tests: %w", err)
+	}
+
+	return processTestResults(testEvents, out)
 }
 
 func main() {
-	log.SetOutput(io.Discard)
+	// Initialize real components
+	realFS := mutator.RealFileSystem{}
+	realFCP := mutator.RealFileContentProvider{}
+	mut := mutator.New(realFS, realFCP) // This is a mutator.Mutator
 
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(0)
-	}
+	realCmdRunner := testrunner.RealCommandRunner{}
+	tr := testrunner.New(realCmdRunner) // This is a testrunner.TestRunner
 
-	mutationDir := os.Getenv(GOMUTATION)
-	if mutationDir == "" {
-		tmpDir, err := os.MkdirTemp("", "mutation")
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		mutationDir = tmpDir
-	}
-
-	err := os.MkdirAll(mutationDir, os.ModePerm)
+	// os.Args[0] is the program name, os.Args[1:] are the actual arguments.
+	// Pass the real implementations that satisfy the interfaces.
+	err := runApp(os.Args[1:], os.Stdout, mut, tr)
 	if err != nil {
-		log.Fatalf("failed to create mutation directory: %s", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
+}
 
-	log.Printf("mutation directory: %s", mutationDir)
-
-	filenames := os.Args[1:]
-	overlay, err := runMutations(filenames, mutationDir, os.Stdout)
-	if err != nil {
-		log.Fatalf("failed to run mutations: %s", err)
-	}
-
-	absPath, err := filepath.Abs(filenames[0])
-	if err != nil {
-		log.Fatalln(err)
-	}
-	dir := filepath.Dir(absPath)
-
-	log.Printf("running go test on dir: %s", dir)
-
-	tests, err := runGoTest(dir, overlay)
-	if err != nil {
-		log.Fatalf("error running go test: %s", err)
-	}
-
+// processTestResults processes the events and prints results to out.
+// It returns an error if mutations were not caught, nil otherwise.
+func processTestResults(events []testrunner.TestEvent, out io.Writer) error {
 	testCount := 0
-	failed := 0
-	for _, test := range tests {
-		if test.Test == "" {
+	caughtMutations := 0
+
+	for _, event := range events {
+		if event.Test == "" { // Skip non-test events (e.g., package pass/fail summaries)
 			continue
 		}
 
-		switch test.Action {
-		case "run":
-			fmt.Printf("=== RUN   %s\n", test.Test)
-		case "pass":
+		action := event.Action
+		// Optionally print detailed test event line
+		// fmt.Fprintf(out, "Test: %s, Action: %s, Elapsed: %.2fs\n", event.Test, event.Action, event.Elapsed)
+
+		switch action {
+		case "pass": // Test passed with mutation active => mutation NOT caught
 			testCount++
-			fmt.Printf("--- PASS: %s (%0.2fs) - MUTATION NOT CAUGHT\n", test.Test, test.Elapsed)
-		case "fail":
+			fmt.Fprintf(out, "  --- UNCAUGHT: %s (%0.2fs)\n", event.Test, event.Elapsed)
+		case "fail": // Test failed with mutation active => mutation CAUGHT
 			testCount++
-			failed++
-			fmt.Printf("--- FAIL: %s (%0.2fs) - MUTATION CAUGHT\n", test.Test, test.Elapsed)
+			caughtMutations++
+			fmt.Fprintf(out, "  --- CAUGHT:   %s (%0.2fs)\n", event.Test, event.Elapsed)
+		case "skip":
+			// testCount++ // Decide if skipped tests should count towards total
+			fmt.Fprintf(out, "  --- SKIPPED:  %s (%0.2fs)\n", event.Test, event.Elapsed)
 		}
 	}
 
-	if failed != testCount {
-		fmt.Printf("FAIL\n%d out of %d tests didn't catch any mutations\n", testCount-failed, testCount)
-		os.Exit(1)
+	if testCount == 0 {
+		fmt.Fprintln(out, "\nNo tests were run or found that covered the applied mutations.")
+		// This state might be considered a failure in mutation testing context,
+		// as it means the mutations are not validated.
+		return fmt.Errorf("no tests covered the mutations")
 	}
 
-	fmt.Println("PASS")
-}
-
-type TestEvent struct {
-	Time    time.Time // encodes as an RFC3339-format string
-	Action  string
-	Package string
-	Test    string
-	Elapsed float64 // seconds
-	Output  string
-}
-
-func parseGoTestOutput(test []byte) ([]TestEvent, error) {
-	var tests []TestEvent
-	list := "[" + strings.ReplaceAll(string(test[:len(test)-1]), "\n", ",") + "]"
-	err := json.Unmarshal([]byte(list), &tests)
-	if err != nil {
-		log.Printf("raw json: %s", test)
-		return nil, fmt.Errorf("error unmarshaling json: %s", err)
-	}
-	return tests, nil
-}
-
-func runGoTest(pkgDir, overlay string) ([]TestEvent, error) {
-	out, err := exec.Command("go", "test", "--json", "--overlay", overlay, pkgDir).CombinedOutput()
-	if err != nil {
-		// go test returns with exit code 1 if tests fail
-		// let's log just in case but move on
-		log.Println(err)
+	mutationScore := 0.0
+	if testCount > 0 {
+		mutationScore = (float64(caughtMutations) / float64(testCount)) * 100
 	}
 
-	return parseGoTestOutput(out)
-}
+	fmt.Fprintf(out, "\nMutation Score: %.2f%% (%d out of %d mutations caught by tests)\n", mutationScore, caughtMutations, testCount)
 
-func runMutations(filenames []string, mutationDir string, output io.Writer) (string, error) {
-	overlays := map[string]string{}
-	for _, filename := range filenames {
-		log.Printf("source file: %s", filename)
-
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, filename, nil, 0)
-		if err != nil {
-			return "", err
-		}
-
-		astutil.Apply(file, nil, reverseIfCond)
-		mutatedFile := filepath.Join(mutationDir, filepath.Base(filename))
-
-		log.Printf("mutated file: %s", mutatedFile)
-		f, err := os.Create(mutatedFile)
-		if err != nil {
-			return "", err
-		}
-		defer f.Close()
-
-		printer.Fprint(f, fset, file)
-		overlays[filename] = mutatedFile
+	if caughtMutations < testCount {
+		// This is the primary failure condition for the tool's purpose.
+		return fmt.Errorf("%d out of %d mutations were not caught by any test", testCount-caughtMutations, testCount)
 	}
 
-	type ov struct {
-		Replace map[string]string
-	}
-
-	bytes, err := json.Marshal(ov{Replace: overlays})
-	if err != nil {
-		return "", err
-	}
-
-	overlay := filepath.Join(mutationDir, "overlay.json")
-	log.Printf("overlay file: %s", overlay)
-
-	f, err := os.Create(overlay)
-	if err != nil {
-		return "", err
-	}
-	fmt.Fprintf(f, "%s", bytes)
-
-	return overlay, nil
-}
-
-func reverseIfCond(c *astutil.Cursor) bool {
-	n := c.Node()
-	switch x := n.(type) {
-	case *ast.IfStmt:
-		bin, ok := x.Cond.(*ast.BinaryExpr)
-		if ok {
-			notBin := &ast.UnaryExpr{
-				Op: token.NOT,
-				X:  bin,
-			}
-			x.Cond = notBin
-		}
-	}
-
-	return true
+	fmt.Fprintln(out, "PASS: All applied mutations were caught by tests.")
+	return nil
 }
