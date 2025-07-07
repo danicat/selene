@@ -12,7 +12,7 @@ import (
 	"time"
 
 	// Ensure this path matches your actual module structure for testrunner
-	"github.com/your-username/selene/testrunner"
+	"github.com/danicat/selene/testrunner"
 )
 
 // MockMutationCreator provides a mock implementation of the MutationCreator interface.
