@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"selene/mutator"
-	"selene/testrunner"
+	"github.com/danicat/selene/mutator"
+	"github.com/danicat/selene/testrunner"
 )
 
 const GOMUTATION = "GOMUTATION" // Environment variable for specifying mutation directory
