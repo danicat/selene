@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"log"
 	"testing"
 	"time"
 

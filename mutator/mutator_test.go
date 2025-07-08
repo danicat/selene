@@ -18,13 +18,13 @@ import (
 
 // MockFileSystem is a mock implementation of the FileSystem interface for testing.
 type MockFileSystem struct {
-	MkdirAllFunc func(path string, perm os.FileMode) error
-	CreateFunc func(name string) (io.WriteCloser, error)
-	WriteFileFunc func(name string, data []byte, perm os.FileMode) error
-	AbsFunc func(path string) (string, error)
+	MkdirAllFunc   func(path string, perm os.FileMode) error
+	CreateFunc     func(name string) (io.WriteCloser, error)
+	WriteFileFunc  func(name string, data []byte, perm os.FileMode) error
+	AbsFunc        func(path string) (string, error)
 	IsNotExistFunc func(err error) bool
-	CreatedFiles map[string][]byte
-	MkdirAllPaths []string
+	CreatedFiles   map[string][]byte
+	MkdirAllPaths  []string
 }
 
 // NewMockFileSystem initializes a MockFileSystem.
@@ -128,7 +128,6 @@ func (mfcp *MockFileContentProvider) ReadFile(filename string) ([]byte, error) {
 	}
 	return content, nil
 }
-
 
 func TestReverseIfCond(t *testing.T) {
 	tests := []struct {
