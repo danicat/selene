@@ -1,5 +1,5 @@
 module github.com/danicat/selene
 
-go 1.21
+go 1.24.5
 
-require golang.org/x/tools v0.12.0
+require golang.org/x/tools v0.34.0
