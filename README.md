@@ -1,3 +1,5 @@
+This is not an officially supported Google product.
+
 # selene
 
 This is an experiment to enable mutation testing in Go.
