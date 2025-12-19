@@ -17,8 +17,20 @@ func (m *ReverseIfCond) Name() string {
 }
 
 func (m *ReverseIfCond) Check(node ast.Node) bool {
-	_, ok := node.(*ast.IfStmt)
-	return ok
+	x, ok := node.(*ast.IfStmt)
+	if !ok {
+		return false
+	}
+
+	// Avoid overlap with Comparison and Logical mutators
+	if bin, ok := x.Cond.(*ast.BinaryExpr); ok {
+		switch bin.Op {
+		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ, token.LAND, token.LOR:
+			return false
+		}
+	}
+
+	return true
 }
 
 func (m *ReverseIfCond) Apply(node ast.Node) {

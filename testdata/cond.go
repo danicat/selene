@@ -15,3 +15,17 @@ func uncovered(x int) int {
 	}
 	return 0
 }
+
+func complexCond(a, b bool) bool {
+	if a && b {
+		return true
+	}
+	return false
+}
+
+func simpleBool(a bool) bool {
+	if a {
+		return true
+	}
+	return false
+}
