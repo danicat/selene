@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/danicat/selene/internal/mutator"
 	"github.com/danicat/selene/internal/runner"
@@ -24,8 +26,49 @@ var runCmd = &cobra.Command{
 			}
 			mutationDir = tmpDir
 		}
-		
+
 		fmt.Printf("Mutation directory: %s\n", mutationDir)
+
+		var files []string
+		for _, arg := range args {
+			if strings.Contains(arg, "...") {
+				// Use go list to find all files in the pattern
+				out, err := exec.Command("go", "list", "-f", "{{range .GoFiles}}{{.}} {{end}}", arg).Output()
+				if err != nil {
+					// Fallback to original arg if go list fails (e.g. not in a module)
+					files = append(files, arg)
+					continue
+				}
+
+				// Get the package directories to build absolute paths
+				dirOut, err := exec.Command("go", "list", "-f", "{{.Dir}}", arg).Output()
+				if err != nil {
+					files = append(files, arg)
+					continue
+				}
+
+				dirs := strings.Split(strings.TrimSpace(string(dirOut)), "\n")
+				fileLists := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+				for i, fileList := range fileLists {
+					if i >= len(dirs) {
+						break
+					}
+					dir := dirs[i]
+					fs := strings.Fields(fileList)
+					for _, f := range fs {
+						files = append(files, filepath.Join(dir, f))
+					}
+				}
+			} else {
+				files = append(files, arg)
+			}
+		}
+
+		if len(files) == 0 {
+			fmt.Println("No files found to mutate.")
+			return
+		}
 
 		mutators := []mutator.Mutator{}
 		mutatorNames, _ := cmd.Flags().GetStringSlice("mutators")
@@ -58,7 +101,7 @@ var runCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		results, err := runner.RunIterative(args, mutationDir, mutators, coverage)
+		results, err := runner.RunIterative(files, mutationDir, mutators, coverage)
 		if err != nil {
 			fmt.Printf("Error running mutations: %s\n", err)
 			os.Exit(1)

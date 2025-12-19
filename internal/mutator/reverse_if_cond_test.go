@@ -17,10 +17,10 @@ func TestReverseIfCond(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "binary expression",
+			name: "boolean variable",
 			src: `package main
 func main() {
-	if a == b {
+	if a {
 		return
 	}
 }
@@ -28,7 +28,25 @@ func main() {
 			expected: `package main
 
 func main() {
-	if !(a == b) {
+	if !a {
+		return
+	}
+}
+`,
+		},
+		{
+			name: "function call",
+			src: `package main
+func main() {
+	if isReady() {
+		return
+	}
+}
+`,
+			expected: `package main
+
+func main() {
+	if !isReady() {
 		return
 	}
 }
@@ -56,10 +74,10 @@ func main() {
 			name: "multiple ifs",
 			src: `package main
 func main() {
-	if a == b {
+	if a {
 		return
 	}
-	if c != d {
+	if b {
 		return
 	}
 }
@@ -67,10 +85,10 @@ func main() {
 			expected: `package main
 
 func main() {
-	if !(a == b) {
+	if !a {
 		return
 	}
-	if !(c != d) {
+	if !b {
 		return
 	}
 }
@@ -80,8 +98,8 @@ func main() {
 			name: "nested ifs",
 			src: `package main
 func main() {
-	if a == b {
-		if c > d {
+	if a {
+		if b {
 			return
 		}
 	}
@@ -90,8 +108,8 @@ func main() {
 			expected: `package main
 
 func main() {
-	if !(a == b) {
-		if !(c > d) {
+	if !a {
+		if !b {
 			return
 		}
 	}

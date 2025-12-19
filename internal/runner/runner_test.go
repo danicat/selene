@@ -37,21 +37,20 @@ func TestMain(t *testing.T) {
 		t.Fatalf("WriteFile main_test.go failed: %v", err)
 	}
 
-	// Run mutations
-	results, err := RunIterative([]string{srcFile}, tmpDir, []mutator.Mutator{&mutator.ReverseIfCond{}}, nil)
-	if err != nil {
-		t.Fatalf("RunIterative failed: %v", err)
-	}
+		// Run mutations
+		results, err := RunIterative([]string{srcFile}, tmpDir, []mutator.Mutator{&mutator.Comparison{}}, nil)
+		if err != nil {
+			t.Fatalf("RunIterative failed: %v", err)
+		}
 	
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-
-	// Check result
-	// The mutation changes `if 1 == 1` to `if !(1 == 1)`.
-	// So the condition becomes false, and `t.Fail()` is executed.
-	// Thus, the test should fail (mutation killed).
-	if results[0].Status != "killed" {
-		t.Errorf("expected status 'killed', got '%s'", results[0].Status)
-	}
-}
+		if len(results) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(results))
+		}
+	
+		// Check result
+		// The mutation changes `if 1 == 1` to `if 1 != 1`.
+		// So the condition becomes false, and `t.Fail()` is executed.
+		// Thus, the test should fail (mutation killed).
+		if results[0].Status != "killed" {
+			t.Errorf("expected status 'killed', got '%s'", results[0].Status)
+		}}

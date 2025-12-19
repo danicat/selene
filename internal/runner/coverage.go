@@ -84,7 +84,33 @@ func LoadCoverage(filename string) (*Coverage, error) {
 func (c *Coverage) IsCovered(filename string, line int) bool {
 	// Try to match filename suffix
 	for covFile, blocks := range c.Blocks {
-		if strings.HasSuffix(filename, covFile) || strings.HasSuffix(covFile, filename) {
+		match := false
+		if strings.HasSuffix(filename, covFile) {
+			match = true
+		} else {
+			// If covFile has a module prefix, try to match after the last / of the module name
+			// This is still a bit simplified but better than before.
+			// Actually, the most robust way is to see if the filename ends with the covFile 
+			// after we possibly strip some components.
+			// Let's try matching the components from right to left.
+			fParts := strings.Split(filename, "/")
+			cParts := strings.Split(covFile, "/")
+			
+			if len(fParts) > 0 && len(cParts) > 0 {
+				i := len(fParts) - 1
+				j := len(cParts) - 1
+				for i >= 0 && j >= 0 && fParts[i] == cParts[j] {
+					i--
+					j--
+				}
+				// If we matched at least the filename and the immediate parent dir
+				if (len(cParts) - 1 - j) >= 2 || (len(cParts) == 1 && j == -1) {
+					match = true
+				}
+			}
+		}
+
+		if match {
 			for _, b := range blocks {
 				if line >= b.StartLine && line <= b.EndLine {
 					return true
