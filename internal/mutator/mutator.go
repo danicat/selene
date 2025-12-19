@@ -13,6 +13,7 @@ type Mutator interface {
 	Name() string
 	Check(node ast.Node) bool
 	Apply(node ast.Node)
+	Position(node ast.Node) token.Pos
 }
 
 var registry = make(map[string]Mutator)
@@ -52,8 +53,8 @@ func Scan(file *ast.File, fset *token.FileSet, mutators []Mutator) []Candidate {
 	astutil.Apply(file, nil, func(c *astutil.Cursor) bool {
 		for _, m := range mutators {
 			if m.Check(c.Node()) {
-				pos := fset.Position(c.Node().Pos())
-				id := fmt.Sprintf("%s-%s:%d", m.Name(), pos.Filename, pos.Line)
+				pos := fset.Position(m.Position(c.Node()))
+				id := fmt.Sprintf("%s-%s:%d:%d", m.Name(), pos.Filename, pos.Line, pos.Column)
 				candidates = append(candidates, Candidate{
 					ID:      id,
 					Mutator: m,

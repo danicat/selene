@@ -28,11 +28,15 @@ func (m *ReverseIfCond) Apply(node ast.Node) {
 		if _, ok := cond.(*ast.BinaryExpr); ok {
 			cond = &ast.ParenExpr{X: cond}
 		}
-		
+
 		notExpr := &ast.UnaryExpr{
 			Op: token.NOT,
 			X:  cond,
 		}
 		x.Cond = notExpr
 	}
+}
+
+func (m *ReverseIfCond) Position(node ast.Node) token.Pos {
+	return node.Pos()
 }

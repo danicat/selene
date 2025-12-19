@@ -40,3 +40,10 @@ func (m *SwapArithmetic) Apply(node ast.Node) {
 		}
 	}
 }
+
+func (m *SwapArithmetic) Position(node ast.Node) token.Pos {
+	if x, ok := node.(*ast.BinaryExpr); ok {
+		return x.OpPos
+	}
+	return node.Pos()
+}
