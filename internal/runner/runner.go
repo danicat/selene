@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"go/parser"
 	"go/printer"
@@ -51,6 +52,7 @@ func RunIterative(filenames []string, mutationDir string, mutators []mutator.Mut
 			// Check coverage
 			pos := fset.Position(c.Node.Pos())
 			if coverage != nil && !coverage.IsCovered(filename, pos.Line) {
+				fmt.Printf("Skipping uncovered mutation: %s\n", c.ID)
 				continue
 			}
 
