@@ -16,13 +16,13 @@ The tool reads the source files, parses the AST, replaces relevant nodes (mutati
 Install directly using `go install`:
 
 ```bash
-go install github.com/danicat/selene/cmd/selene@latest
+go install github.com/danicat/selene@latest
 ```
 
 Or build from source:
 
 ```bash
-go build -o selene cmd/selene/main.go
+go build -o selene .
 ```
 
 ## Usage
