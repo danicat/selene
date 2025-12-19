@@ -27,19 +27,25 @@ go build -o selene .
 
 ## Usage
 
-Run mutation testing on specific files:
+Run mutation testing on specific files or package patterns:
 
 ```bash
+# Run on specific files
 ./selene run <file1.go> <file2.go> ...
+
+# Run on all files in the current package and subpackages
+./selene run ./...
 ```
 
 ### Example
 
 ```bash
-$ ./selene run testdata/cond.go
+$ ./selene run ./...
 Mutation directory: /var/folders/.../T/mutation12345
-ReverseIfCond-testdata/cond.go:6: killed
-Score: 1/1 (100.00%)
+Running tests to generate coverage profile...
+ReverseIfCond-internal/mutator/mutator.go:50:8: killed
+SwapArithmetic-internal/mutator/swap_arithmetic.go:19:52: killed
+Score: 2/2 (100.00%)
 ```
 
 ### Options
