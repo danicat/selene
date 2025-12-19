@@ -108,16 +108,33 @@ var runCmd = &cobra.Command{
 		}
 
 		killed := 0
+		survived := 0
+		uncovered := 0
 		for _, r := range results {
-			if r.Status == "killed" {
+			switch r.Status {
+			case "killed":
 				killed++
+			case "survived":
+				survived++
+			case "uncovered":
+				uncovered++
 			}
 			fmt.Printf("%s: %s\n", r.ID, r.Status)
 		}
 
-		fmt.Printf("Score: %d/%d (%.2f%%)\n", killed, len(results), float64(killed)/float64(len(results))*100)
+		covered := killed + survived
+		score := 0.0
+		if covered > 0 {
+			score = float64(killed) / float64(covered) * 100
+		}
+
+		fmt.Printf("\nTotal mutations: %d\n", len(results))
+		fmt.Printf("Killed:          %d\n", killed)
+		fmt.Printf("Survived:        %d\n", survived)
+		fmt.Printf("Uncovered:       %d\n", uncovered)
+		fmt.Printf("Mutation Score:  %.2f%% (killed/covered)\n", score)
 		
-		if killed < len(results) {
+		if killed < covered {
 			os.Exit(1)
 		}
 	},

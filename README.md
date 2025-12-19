@@ -45,7 +45,13 @@ Mutation directory: /var/folders/.../T/mutation12345
 Running tests to generate coverage profile...
 ReverseIfCond-internal/mutator/mutator.go:50:8: killed
 SwapArithmetic-internal/mutator/swap_arithmetic.go:19:52: killed
-Score: 2/2 (100.00%)
+Comparison-internal/mutator/comparison.go:10:15: uncovered
+
+Total mutations: 3
+Killed:          2
+Survived:        0
+Uncovered:       1
+Mutation Score:  100.00% (killed/covered)
 ```
 
 ### Options

@@ -2,7 +2,6 @@ package runner
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"go/parser"
 	"go/printer"
@@ -32,7 +31,7 @@ func RunGoTest(pkgDir, overlay string) ([]byte, error) {
 // Result represents the outcome of a mutation test.
 type Result struct {
 	ID     string
-	Status string // "killed", "survived", "error"
+	Status string // "killed", "survived", "uncovered", "error"
 	Output string
 }
 
@@ -52,7 +51,7 @@ func RunIterative(filenames []string, mutationDir string, mutators []mutator.Mut
 			// Check coverage
 			pos := fset.Position(c.Node.Pos())
 			if coverage != nil && !coverage.IsCovered(filename, pos.Line) {
-				fmt.Printf("Skipping uncovered mutation: %s\n", c.ID)
+				results = append(results, Result{ID: c.ID, Status: "uncovered"})
 				continue
 			}
 
