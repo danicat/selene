@@ -8,3 +8,10 @@ func cond(x int) error {
 	}
 	return nil
 }
+
+func uncovered(x int) int {
+	if x > 10 {
+		return x
+	}
+	return 0
+}
