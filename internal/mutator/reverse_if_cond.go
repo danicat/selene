@@ -1,54 +1,48 @@
 package mutator
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 )
 
-func init() {
-	Register(&ReverseIfCond{})
-}
-
-// ReverseIfCond negates boolean expressions in if statements.
+// ReverseIfCond negates the condition of an if statement.
 type ReverseIfCond struct{}
 
 func (m *ReverseIfCond) Name() string {
 	return "ReverseIfCond"
 }
 
-func (m *ReverseIfCond) Check(node ast.Node) bool {
-	x, ok := node.(*ast.IfStmt)
+func (m *ReverseIfCond) Check(n ast.Node) []Mutation {
+	stmt, ok := n.(*ast.IfStmt)
 	if !ok {
-		return false
+		return nil
 	}
 
-	// Avoid overlap with Comparison and Logical mutators
-	if bin, ok := x.Cond.(*ast.BinaryExpr); ok {
-		switch bin.Op {
-		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ, token.LAND, token.LOR:
-			return false
-		}
-	}
+	// Capture the original condition
+	originalCond := stmt.Cond
 
-	return true
-}
-
-func (m *ReverseIfCond) Apply(node ast.Node) {
-	if x, ok := node.(*ast.IfStmt); ok {
-		cond := x.Cond
-		// Wrap in parentheses if it's a binary expression to ensure correct precedence
-		if _, ok := cond.(*ast.BinaryExpr); ok {
-			cond = &ast.ParenExpr{X: cond}
-		}
-
-		notExpr := &ast.UnaryExpr{
+	// Define the mutated condition
+	var mutatedCond ast.Expr
+	if unary, ok := stmt.Cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		mutatedCond = unary.X
+	} else {
+		mutatedCond = &ast.UnaryExpr{
 			Op: token.NOT,
-			X:  cond,
+			X:  &ast.ParenExpr{X: stmt.Cond},
 		}
-		x.Cond = notExpr
 	}
-}
 
-func (m *ReverseIfCond) Position(node ast.Node) token.Pos {
-	return node.Pos()
+	return []Mutation{
+		{
+			ID:  fmt.Sprintf("ReverseIfCond_%d", stmt.Pos()),
+			Pos: stmt.Pos(),
+			Apply: func() {
+				stmt.Cond = mutatedCond
+			},
+			Revert: func() {
+				stmt.Cond = originalCond
+			},
+		},
+	}
 }

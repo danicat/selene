@@ -14,15 +14,3 @@ func TestCond(t *testing.T) {
 func TestFake(t *testing.T) {
 	_ = cond(100) // this doesn't test anything
 }
-
-func TestComplexCond(t *testing.T) {
-	if !complexCond(true, true) {
-		t.Fail()
-	}
-}
-
-func TestSimpleBool(t *testing.T) {
-	if !simpleBool(true) {
-		t.Fail()
-	}
-}
