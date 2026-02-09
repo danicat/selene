@@ -55,8 +55,28 @@ func (r Report) Score() float64 {
 	return float64(r.Killed) / float64(r.Total) * 100
 }
 
+// findModuleRoot looks for the directory containing go.mod starting from dir.
+func findModuleRoot(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(abs, "go.mod")); err == nil {
+			return abs
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			break
+		}
+		abs = parent
+	}
+	return dir
+}
+
 // Run executes the mutation testing process.
 func Run(patterns []string, config Config) (*Report, error) {
+
 	if len(patterns) == 0 {
 		return nil, fmt.Errorf("no patterns provided")
 	}
@@ -104,10 +124,13 @@ func Run(patterns []string, config Config) (*Report, error) {
 	// 2. Generate Coverage
 	log.Println("generating coverage profile...")
 	coverFile := filepath.Join(config.MutationDir, "coverage.out")
-	coverCmd := exec.Command("go", "test", "-coverprofile="+coverFile, "./...")
-	// Run in the directory of the first file to ensure we are in a valid module context
+
+	// Determine the module root to run tests correctly
 	firstAbs, _ := filepath.Abs(filenames[0])
-	coverCmd.Dir = filepath.Dir(firstAbs)
+	moduleRoot := findModuleRoot(filepath.Dir(firstAbs))
+
+	coverCmd := exec.Command("go", "test", "-coverprofile="+coverFile, "./...")
+	coverCmd.Dir = moduleRoot
 
 	if out, err := coverCmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("coverage generation failed: %s\n%s", err, out)
