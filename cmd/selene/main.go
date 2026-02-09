@@ -62,6 +62,8 @@ func main() {
 		&mutator.ArithmeticMutator{},
 		&mutator.ComparisonMutator{},
 		&mutator.BooleanMutator{},
+		&mutator.ConditionalsBoundaryMutator{},
+		&mutator.IncrementDecrementMutator{},
 	}
 
 	config := runner.Config{
