@@ -8,13 +8,15 @@ import (
 	"os"
 
 	"github.com/danicat/selene/internal/mutator"
+
 	"github.com/danicat/selene/internal/runner"
 )
 
 const GOMUTATION = "GOMUTATION"
 
 func usage() {
-	fmt.Println("Usage:\nselene file.go [file2.go ...]")
+	fmt.Println("Usage:\nselene [flags] file.go [file2.go ...]")
+	flag.PrintDefaults()
 }
 
 func main() {
@@ -52,7 +54,9 @@ func main() {
 		log.Printf("mutation directory: %s", mutationDir)
 	}
 
-	filenames := flag.Args()
+	patterns := flag.Args()
+
+	// Register all available mutators (UX: enable all by default)
 	mutators := []mutator.Mutator{
 		&mutator.ReverseIfCond{},
 		&mutator.ArithmeticMutator{},
@@ -66,7 +70,7 @@ func main() {
 		Mutators:    mutators,
 	}
 
-	report, err := runner.Run(filenames, config)
+	report, err := runner.Run(patterns, config)
 	if err != nil {
 		log.Fatalf("error running mutations: %s", err)
 	}
@@ -76,14 +80,18 @@ func main() {
 		os.Exit(0)
 	}
 
-	fmt.Println("\n=== Mutation Testing Report ===")
-	fmt.Printf("Total Mutations: %d\n", report.Total)
-	fmt.Printf("Caught:          %d\n", report.Caught)
-	fmt.Printf("Uncaught:        %d\n", report.Uncaught)
-	fmt.Printf("Build Failures:  %d\n", report.BuildFailures)
+	// Final Report (UX: Match legacy reporting format)
+	fmt.Printf("\nTotal mutations: %d\n", report.Total)
+	fmt.Printf("Killed:          %d\n", report.Killed)
+	fmt.Printf("Survived:        %d\n", report.Survived)
+	fmt.Printf("Uncovered:       %d\n", report.Uncovered)
+	if report.BuildFailures > 0 {
+		fmt.Printf("Build Failures:  %d\n", report.BuildFailures)
+	}
 	fmt.Printf("Mutation Score:  %.2f%%\n", report.Score())
 
-	if report.Uncaught > 0 {
+	// Exit code 1 if any mutations survived
+	if report.Survived > 0 {
 		os.Exit(1)
 	}
 }

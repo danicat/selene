@@ -81,6 +81,8 @@ func TestAdd(t *testing.T) {
 	}
 
 	// Run
+	// We use ./... pattern and set the command to run in the tmpDir
+	// To do this faithfully to how Run works, we just pass the file path.
 	report, err := Run([]string{srcPath}, config)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
@@ -89,8 +91,8 @@ func TestAdd(t *testing.T) {
 	if report.Total != 1 {
 		t.Errorf("expected 1 mutation, got %d", report.Total)
 	}
-	if report.Caught != 1 {
-		t.Errorf("expected 1 caught mutation, got %d", report.Caught)
+	if report.Killed != 1 {
+		t.Errorf("expected 1 killed mutation, got %d", report.Killed)
 	}
 }
 
@@ -99,9 +101,9 @@ func TestReportScore(t *testing.T) {
 		report Report
 		want   float64
 	}{
-		{Report{Total: 0, Caught: 0}, 0},
-		{Report{Total: 10, Caught: 5}, 50.0},
-		{Report{Total: 4, Caught: 4}, 100.0},
+		{Report{Total: 0, Killed: 0, Survived: 0}, 0},
+		{Report{Total: 10, Killed: 5, Survived: 5}, 50.0},
+		{Report{Total: 4, Killed: 4, Survived: 0}, 100.0},
 	}
 	for _, tt := range tests {
 		if got := tt.report.Score(); got != tt.want {
