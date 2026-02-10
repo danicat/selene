@@ -91,8 +91,8 @@ func TestAdd(t *testing.T) {
 	if report.Total != 1 {
 		t.Errorf("expected 1 mutation, got %d", report.Total)
 	}
-	if report.Killed != 1 {
-		t.Errorf("expected 1 killed mutation, got %d", report.Killed)
+	if report.Killed+report.Timeouts != 1 {
+		t.Errorf("expected 1 killed/timeout mutation, got %d", report.Killed+report.Timeouts)
 	}
 }
 
@@ -101,9 +101,10 @@ func TestReportScore(t *testing.T) {
 		report Report
 		want   float64
 	}{
-		{Report{Total: 0, Killed: 0, Survived: 0}, 0},
-		{Report{Total: 10, Killed: 5, Survived: 5}, 50.0},
-		{Report{Total: 4, Killed: 4, Survived: 0}, 100.0},
+		{Report{Total: 0, Killed: 0, Timeouts: 0, Survived: 0}, 0},
+		{Report{Total: 10, Killed: 5, Timeouts: 0, Survived: 5}, 50.0},
+		{Report{Total: 10, Killed: 3, Timeouts: 2, Survived: 5}, 50.0},
+		{Report{Total: 4, Killed: 4, Timeouts: 0, Survived: 0}, 100.0},
 	}
 	for _, tt := range tests {
 		if got := tt.report.Score(); got != tt.want {
