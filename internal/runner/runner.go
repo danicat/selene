@@ -56,6 +56,7 @@ type Report struct {
 	Survived      int
 	Uncovered     int
 	BuildFailures int
+	TestKills     map[string][]string // test name -> list of mutation IDs
 }
 
 func (r Report) Score() float64 {
@@ -91,10 +92,12 @@ type mutationResult struct {
 	line          int
 	col           int
 	buildFailures int
+	killedBy      []string
 }
 
 // Run executes the mutation testing process.
 func Run(patterns []string, config Config) (*Report, error) {
+
 	if len(patterns) == 0 {
 		return nil, fmt.Errorf("no patterns provided")
 	}
@@ -193,13 +196,16 @@ func Run(patterns []string, config Config) (*Report, error) {
 	// Collector (Reducer)
 	finalReport := make(chan *Report)
 	go func() {
-		report := &Report{}
+		report := &Report{TestKills: make(map[string][]string)}
 		for res := range results {
 			report.Total++
 			displayStatus := res.status
 			switch res.status {
 			case "killed":
 				report.Killed++
+				for _, test := range res.killedBy {
+					report.TestKills[test] = append(report.TestKills[test], res.mutID)
+				}
 			case "killed (timeout)":
 				report.Timeouts++
 			case "survived":
@@ -208,8 +214,13 @@ func Run(patterns []string, config Config) (*Report, error) {
 				report.Uncovered++
 				displayStatus = "survived (uncovered)"
 			}
+
 			report.BuildFailures += res.buildFailures
-			fmt.Printf("%s-%s:%d:%d: %s\n", res.mutID, res.filename, res.line, res.col, displayStatus)
+			fmt.Printf("%s-%s:%d:%d: %s", res.mutID, res.filename, res.line, res.col, displayStatus)
+			if len(res.killedBy) > 0 {
+				fmt.Printf(" (Killed by: %s)", strings.Join(res.killedBy, ", "))
+			}
+			fmt.Println()
 		}
 		finalReport <- report
 	}()
@@ -236,6 +247,7 @@ func Run(patterns []string, config Config) (*Report, error) {
 
 				status := "survived"
 				bFailures := 0
+				var killedBy []string
 
 				if err := writeAST(mutatedFile, t.pf.Fset, t.pf.File); err != nil {
 					if config.Verbose {
@@ -270,9 +282,9 @@ func Run(patterns []string, config Config) (*Report, error) {
 				} else {
 					killed := false
 					for _, e := range events {
-						if e.Action == "fail" {
+						if e.Action == "fail" && e.Test != "" {
 							killed = true
-							break
+							killedBy = append(killedBy, e.Test)
 						}
 					}
 					if killed {
@@ -287,11 +299,13 @@ func Run(patterns []string, config Config) (*Report, error) {
 					line:          pos.Line,
 					col:           pos.Column,
 					buildFailures: bFailures,
+					killedBy:      killedBy,
 				}
 				t.mut.Revert()
-			}
+						}
 		}(i)
 	}
+
 
 	// Generator (Producer)
 	for _, filename := range filenames {

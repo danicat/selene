@@ -133,32 +133,8 @@ func TestRunErrors(t *testing.T) {
 	}
 }
 
-// Stub function to mock exec.Command if we wanted strictly unit tests,
-
-// but for this integration test we actually want to run go test.
-// NOTE: This test requires 'go' to be in PATH.
-func TestRunGoTest(t *testing.T) {
-	// This function is hard to unit test without mocking exec.Command.
-	// Given the context, the integration test TestRun covers the happy path.
-	// We can test error cases here if needed.
-
-	// Create a dummy overlay file
-	tmpDir := t.TempDir()
-	overlayPath := filepath.Join(tmpDir, "overlay.json")
-
-	// Write invalid JSON to force error or just check parsing of empty output
-	if err := os.WriteFile(overlayPath, []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Calling runGoTest on a dir that doesn't have tests might return empty
-
-	// or error depending on go test behavior.
-	// Since we can't easily mock exec in Go without re-execing the test binary,
-	// we'll rely on TestRun for the integration verification.
-}
-
 func TestParseGoTestOutput(t *testing.T) {
+
 	input := []byte(`{"Time":"2023-10-26T10:00:00.000000Z","Action":"run","Package":"github.com/danicat/selene","Test":"TestExample"}
 {"Time":"2023-10-26T10:00:00.100000Z","Action":"pass","Package":"github.com/danicat/selene","Test":"TestExample","Elapsed":0.1}
 `)
