@@ -117,9 +117,11 @@ func Run(patterns []string, config Config) (*Report, error) {
 	}
 	r := rand.New(rand.NewSource(config.Seed))
 
-	fmt.Printf("Seed: %d\n", config.Seed)
-	if config.Shuffle {
-		fmt.Println("Shuffle: enabled")
+	if config.Verbose {
+		fmt.Printf("Seed: %d\n", config.Seed)
+		if config.Shuffle {
+			fmt.Println("Shuffle: enabled")
+		}
 	}
 
 	// 1. Path Expansion
@@ -216,11 +218,14 @@ func Run(patterns []string, config Config) (*Report, error) {
 			}
 
 			report.BuildFailures += res.buildFailures
-			fmt.Printf("%s-%s:%d:%d: %s", res.mutID, res.filename, res.line, res.col, displayStatus)
-			if len(res.killedBy) > 0 {
-				fmt.Printf(" (Killed by: %s)", strings.Join(res.killedBy, ", "))
+
+			if config.Verbose {
+				fmt.Printf("%s-%s:%d:%d: %s", res.mutID, res.filename, res.line, res.col, displayStatus)
+				if len(res.killedBy) > 0 {
+					fmt.Printf(" (Killed by: %s)", strings.Join(res.killedBy, ", "))
+				}
+				fmt.Println()
 			}
-			fmt.Println()
 		}
 		finalReport <- report
 	}()
@@ -302,10 +307,9 @@ func Run(patterns []string, config Config) (*Report, error) {
 					killedBy:      killedBy,
 				}
 				t.mut.Revert()
-						}
+			}
 		}(i)
 	}
-
 
 	// Generator (Producer)
 	for _, filename := range filenames {
