@@ -27,9 +27,9 @@ func TestBuildRunFilter(t *testing.T) {
 			expected: "^TestAdd$",
 		},
 		{
-			name:     "subtest normalized to parent",
+			name:     "single subtest exact match",
 			input:    []string{"TestAdd/subtest_1"},
-			expected: "^TestAdd$",
+			expected: "^TestAdd/subtest_1$",
 		},
 		{
 			name:     "multiple tests",
@@ -37,7 +37,12 @@ func TestBuildRunFilter(t *testing.T) {
 			expected: "^(TestAdd|TestSub)$",
 		},
 		{
-			name:     "multiple subtests deduplicated",
+			name:     "multiple subtests same parent",
+			input:    []string{"TestAdd/a", "TestAdd/b"},
+			expected: "^TestAdd/(a|b)$",
+		},
+		{
+			name:     "multiple subtests across different parents",
 			input:    []string{"TestAdd/a", "TestAdd/b", "TestSub/1"},
 			expected: "^(TestAdd|TestSub)$",
 		},
@@ -69,7 +74,7 @@ func TestBuildRunFilter(t *testing.T) {
 		{
 			name:     "regex special characters in subtest name",
 			input:    []string{"TestAdd[1]/sub_case"},
-			expected: `^TestAdd\[1\]$`,
+			expected: `^TestAdd\[1\]/sub_case$`,
 		},
 	}
 
@@ -95,10 +100,10 @@ func TestMemoryTestIndex(t *testing.T) {
 		t.Errorf("expected [TestFoo] for line 12, got %v", cov12)
 	}
 
-	// Line 18 in main.go -> TestBar, TestFoo
+	// Line 18 in main.go -> TestBar/subtest, TestFoo
 	cov18 := idx.GetCoveringTests("/app/main.go", 18)
-	if len(cov18) != 2 || cov18[0] != "TestBar" || cov18[1] != "TestFoo" {
-		t.Errorf("expected [TestBar, TestFoo] for line 18, got %v", cov18)
+	if len(cov18) != 2 || cov18[0] != "TestBar/subtest" || cov18[1] != "TestFoo" {
+		t.Errorf("expected [TestBar/subtest, TestFoo] for line 18, got %v", cov18)
 	}
 
 	// Line 30 in main.go -> empty
@@ -206,10 +211,10 @@ func TestDatabase_LoadTestCoverage_StartEndLineSchema(t *testing.T) {
 		t.Errorf("expected [TestCompute] for calc.go:12, got %v", cov12)
 	}
 
-	// Check calc.go line 18 -> TestCompute (subtest normalized and deduplicated)
+	// Check calc.go line 18 -> TestCompute and TestCompute/Sub (exact subtests preserved)
 	cov18 := index.GetCoveringTests("calc.go", 18)
-	if len(cov18) != 1 || cov18[0] != "TestCompute" {
-		t.Errorf("expected [TestCompute] for calc.go:18, got %v", cov18)
+	if len(cov18) != 2 || cov18[0] != "TestCompute" || cov18[1] != "TestCompute/Sub" {
+		t.Errorf("expected [TestCompute, TestCompute/Sub] for calc.go:18, got %v", cov18)
 	}
 
 	// Check calc.go line 35 -> TestMax

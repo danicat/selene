@@ -18,18 +18,21 @@ If a test suite passes despite code mutations, those surviving mutants indicate 
 
 ## 📦 Installation
 
-Install the latest binary using `go install`:
+### Via One-Liner Script (Recommended)
+```bash
+curl -fsSL https://raw.githubusercontent.com/danicat/selene/main/install.sh | bash
+```
 
+### Via `go install`
 ```bash
 go install github.com/danicat/selene/cmd/selene@latest
 ```
 
-Or build directly from source:
-
+### Build from Source
 ```bash
 git clone https://github.com/danicat/selene.git
 cd selene
-go build -o selene ./cmd/selene
+make build
 ```
 
 ---
@@ -208,7 +211,7 @@ CREATE TABLE IF NOT EXISTS selene_tests (
   ```sql
   SELECT id, mutator, file, line, col FROM selene WHERE status = 'survived';
   ```
-* `selene_zero_kill_tests`: List of tests that ran but caught 0 mutations in the current run (alias: `selene_bad_tests`).
+* `selene_zero_kill_tests`: List of tests that ran but caught 0 mutations in the current run.
   ```sql
   SELECT test_name, package FROM selene_zero_kill_tests;
   ```
@@ -277,7 +280,7 @@ $ selene -json ./...
     "TestComparisonMutator",
     "TestBoundaryMutator"
   ],
-  "bad_tests": [
+  "zero_kill_tests": [
     "TestUnrelatedHelper",
     "TestTrivialGetter",
     "TestMockLogger"
@@ -296,7 +299,7 @@ $ selene -json ./...
   * Uncovered mutants are counted in the total to provide an honest, uninflated metric.
 * **Test Quality Score**: $\frac{\text{Good Tests}}{\text{Total Tests}} \times 100\%$
   * A "good test" caught at least one code mutant.
-  * A "bad test" caught 0 mutants, indicating assertions may be weak, redundant, or missing.
+  * A "zero-kill test" caught 0 mutants, indicating assertions may be weak, redundant, or missing.
 
 ---
 

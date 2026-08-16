@@ -5,15 +5,21 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
-// TestIndex provides thread-safe in-memory mapping from (file, line) to covering test names.
+// TestIndex provides thread-safe in-memory mapping from (file, line) to covering test names
+// and tracks baseline test execution durations for adaptive timeout calculations.
 type TestIndex interface {
 	GetCoveringTests(file string, line int) []string
 	AddCoverage(file string, startLine, endLine int, testName string)
+	SetTestDuration(testName string, d time.Duration)
+	GetTestDuration(testName string) time.Duration
+	GetExpectedDuration(file string, line int) time.Duration
 }
 
 type coverageRange struct {
@@ -24,14 +30,16 @@ type coverageRange struct {
 
 // MemoryTestIndex is an in-memory thread-safe implementation of TestIndex.
 type MemoryTestIndex struct {
-	mu     sync.RWMutex
-	ranges map[string][]coverageRange // keyed by normalized file path
+	mu        sync.RWMutex
+	ranges    map[string][]coverageRange // keyed by normalized file path
+	durations map[string]time.Duration   // testName -> duration
 }
 
 // NewMemoryTestIndex creates a new in-memory test coverage index.
 func NewMemoryTestIndex() *MemoryTestIndex {
 	return &MemoryTestIndex{
-		ranges: make(map[string][]coverageRange),
+		ranges:    make(map[string][]coverageRange),
+		durations: make(map[string]time.Duration),
 	}
 }
 
@@ -77,7 +85,42 @@ func (idx *MemoryTestIndex) AddCoverage(file string, startLine, endLine int, tes
 	}
 }
 
-// GetCoveringTests returns all unique root parent test names that cover the given line.
+// SetTestDuration records the baseline duration of a specific test.
+func (idx *MemoryTestIndex) SetTestDuration(testName string, d time.Duration) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.durations == nil {
+		idx.durations = make(map[string]time.Duration)
+	}
+	idx.durations[testName] = d
+}
+
+// GetTestDuration retrieves the recorded duration of a specific test.
+func (idx *MemoryTestIndex) GetTestDuration(testName string) time.Duration {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if idx.durations == nil {
+		return 0
+	}
+	return idx.durations[testName]
+}
+
+// GetExpectedDuration returns the summed baseline duration of all tests covering the line.
+func (idx *MemoryTestIndex) GetExpectedDuration(file string, line int) time.Duration {
+	tests := idx.GetCoveringTests(file, line)
+	if len(tests) == 0 {
+		return 0
+	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	var total time.Duration
+	for _, t := range tests {
+		total += idx.durations[t]
+	}
+	return total
+}
+
+// GetCoveringTests returns all unique test and subtest names that cover the given line.
 func (idx *MemoryTestIndex) GetCoveringTests(file string, line int) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
@@ -89,24 +132,25 @@ func (idx *MemoryTestIndex) GetCoveringTests(file string, line int) []string {
 
 	var candidateRanges [][]coverageRange
 
+	// 1. Prioritize exact matches first
 	if r, exists := idx.ranges[normFile]; exists {
 		candidateRanges = append(candidateRanges, r)
-	}
-	if cleanFile != normFile {
+	} else if cleanFile != normFile {
 		if r, exists := idx.ranges[cleanFile]; exists {
 			candidateRanges = append(candidateRanges, r)
 		}
 	}
-	if r, exists := idx.ranges[baseFile]; exists {
-		candidateRanges = append(candidateRanges, r)
-	}
 
-	// Suffix / partial path matching if not found directly
+	// 2. Only fallback to base filename or suffix matching if no exact matches exist
 	if len(candidateRanges) == 0 {
-		for key, r := range idx.ranges {
-			if strings.HasSuffix(normFile, key) || strings.HasSuffix(key, normFile) ||
-				strings.HasSuffix(cleanFile, key) || strings.HasSuffix(key, cleanFile) {
-				candidateRanges = append(candidateRanges, r)
+		if r, exists := idx.ranges[baseFile]; exists {
+			candidateRanges = append(candidateRanges, r)
+		} else {
+			for key, r := range idx.ranges {
+				if strings.HasSuffix(normFile, key) || strings.HasSuffix(key, normFile) ||
+					strings.HasSuffix(cleanFile, key) || strings.HasSuffix(key, cleanFile) {
+					candidateRanges = append(candidateRanges, r)
+				}
 			}
 		}
 	}
@@ -114,9 +158,9 @@ func (idx *MemoryTestIndex) GetCoveringTests(file string, line int) []string {
 	for _, list := range candidateRanges {
 		for _, r := range list {
 			if line >= r.startLine && line <= r.endLine {
-				parent := ParentTestName(r.testName)
-				if parent != "" {
-					testSet[parent] = true
+				tName := strings.TrimSpace(r.testName)
+				if tName != "" {
+					testSet[tName] = true
 				}
 			}
 		}
@@ -130,32 +174,84 @@ func (idx *MemoryTestIndex) GetCoveringTests(file string, line int) []string {
 	return tests
 }
 
-// BuildRunFilter generates the -run regex for go test.
-// Returns empty string if tests is empty (meaning all tests should run or no filter).
+// BuildRunFilter generates the -run regex for go test matching exact tests and subtests.
+// Correctly handles Go's hierarchical slash-splitting in testing/match.go.
 func BuildRunFilter(tests []string) string {
 	if len(tests) == 0 {
 		return ""
 	}
 
-	// Deduplicate and quote special regex chars if any
+	// Deduplicate
 	seen := make(map[string]bool)
-	var filtered []string
+	var unique []string
 	for _, t := range tests {
-		parent := ParentTestName(t)
-		if parent != "" && !seen[parent] {
-			seen[parent] = true
-			filtered = append(filtered, regexp.QuoteMeta(parent))
+		t = strings.TrimSpace(t)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			unique = append(unique, t)
 		}
 	}
 
-	if len(filtered) == 0 {
+	if len(unique) == 0 {
 		return ""
 	}
-	if len(filtered) == 1 {
-		return "^" + filtered[0] + "$"
+	if len(unique) == 1 {
+		return "^" + regexp.QuoteMeta(unique[0]) + "$"
 	}
-	sort.Strings(filtered)
-	return "^(" + strings.Join(filtered, "|") + ")$"
+
+	// Group tests by top-level parent function
+	parentMap := make(map[string][]string)
+	for _, t := range unique {
+		if parent, sub, ok := strings.Cut(t, "/"); ok && parent != "" && sub != "" {
+			parentMap[parent] = append(parentMap[parent], sub)
+		} else {
+			parentMap[t] = append(parentMap[t], "")
+		}
+	}
+
+	// Case A: All subtests share the EXACT same parent test function
+	if len(parentMap) == 1 {
+		for parent, subs := range parentMap {
+			hasEmpty := slices.Contains(subs, "")
+			if hasEmpty || len(subs) == 0 {
+				return "^" + regexp.QuoteMeta(parent) + "$"
+			}
+			quotedSubs := make([]string, len(subs))
+			for i, s := range subs {
+				quotedSubs[i] = regexp.QuoteMeta(s)
+			}
+			sort.Strings(quotedSubs)
+			return "^" + regexp.QuoteMeta(parent) + "/(" + strings.Join(quotedSubs, "|") + ")$"
+		}
+	}
+
+	// Case B: Tests span multiple parent functions
+	var parents []string
+	for parent := range parentMap {
+		parents = append(parents, regexp.QuoteMeta(parent))
+	}
+	sort.Strings(parents)
+	return "^(" + strings.Join(parents, "|") + ")$"
+}
+
+// CalculateAdaptiveTimeout computes a dynamic timeout budget based on baseline test duration.
+// Formula: max(1.5s, 3.0 * expectedDuration + 0.5s), capped by userTimeout.
+func CalculateAdaptiveTimeout(expectedDuration time.Duration, userTimeout time.Duration) time.Duration {
+	if expectedDuration <= 0 {
+		return userTimeout
+	}
+
+	const (
+		floorTime      = 1500 * time.Millisecond
+		scaleFactor    = 3.0
+		overheadMargin = 500 * time.Millisecond
+	)
+
+	dynamic := max(time.Duration(float64(expectedDuration)*scaleFactor)+overheadMargin, floorTime)
+	if userTimeout > 0 && dynamic > userTimeout {
+		return userTimeout
+	}
+	return dynamic
 }
 
 // LoadTestIndex loads coverage data from a SQLite database file at dbPath.
@@ -169,7 +265,7 @@ func LoadTestIndex(dbPath string) (TestIndex, error) {
 	return LoadTestIndexFromDB(db)
 }
 
-// LoadTestIndexFromDB loads coverage data from an open SQLite database connection.
+// LoadTestIndexFromDB loads coverage data and test durations from an open SQLite database connection.
 func LoadTestIndexFromDB(db *sql.DB) (TestIndex, error) {
 	var tableName string
 	err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='test_coverage'").Scan(&tableName)
@@ -229,5 +325,23 @@ func LoadTestIndexFromDB(db *sql.DB) (TestIndex, error) {
 		}
 		index.AddCoverage(file, startLine, endLine, testName)
 	}
+
+	// Load test durations from all_tests if table exists
+	var allTestsTable string
+	_ = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='all_tests'").Scan(&allTestsTable)
+	if allTestsTable != "" {
+		dRows, err := db.Query("SELECT test, elapsed FROM all_tests WHERE elapsed IS NOT NULL AND test != ''")
+		if err == nil {
+			defer dRows.Close()
+			for dRows.Next() {
+				var tName string
+				var elapsed float64
+				if err := dRows.Scan(&tName, &elapsed); err == nil {
+					index.SetTestDuration(tName, time.Duration(elapsed*float64(time.Second)))
+				}
+			}
+		}
+	}
+
 	return index, nil
 }

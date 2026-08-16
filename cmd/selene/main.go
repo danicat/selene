@@ -11,14 +11,19 @@ import (
 	"github.com/danicat/selene/internal/runner"
 )
 
+var version = "dev"
+
 const GOMUTATION = "GOMUTATION"
 
 func usage() {
-	fmt.Println("Usage:\nselene [flags] file.go [file2.go ...]")
+	fmt.Printf("Selene %s - Fast, Database-Driven Mutation Testing for Go\n\n", version)
+	fmt.Println("Usage:\n  selene [flags] file.go [file2.go ...]")
+	fmt.Println("\nFlags:")
 	flag.PrintDefaults()
 }
 
 func main() {
+	var showVersion bool
 	var verbose bool
 	var mutationDir string
 	var workers int
@@ -28,7 +33,9 @@ func main() {
 	var jsonOut bool
 	var dbPath string
 	var targeted bool
+	var adaptiveTimeout bool
 
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.BoolVar(&verbose, "v", false, "Enable verbose output")
 	flag.StringVar(&mutationDir, "output", "", "Directory to store mutated files (default: temporary dir)")
 	flag.IntVar(&workers, "workers", 0, "Number of parallel workers (default: NumCPU)")
@@ -38,7 +45,13 @@ func main() {
 	flag.BoolVar(&jsonOut, "json", false, "Output results in JSON format")
 	flag.StringVar(&dbPath, "db", "", "Path to SQLite database to store mutation outcomes and test metrics")
 	flag.BoolVar(&targeted, "targeted", false, "Enable targeted test execution using coverage index")
+	flag.BoolVar(&adaptiveTimeout, "adaptive-timeout", false, "Enable adaptive dynamic timeouts based on baseline test durations")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("selene %s\n", version)
+		return
+	}
 
 	if !verbose {
 		log.SetOutput(io.Discard)
@@ -70,16 +83,22 @@ func main() {
 
 	patterns := flag.Args()
 
+	isTargeted := targeted
+	if dbPath != "" {
+		isTargeted = true
+	}
+
 	config := runner.Config{
-		Verbose:     verbose,
-		MutationDir: mutationDir,
-		Mutators:    runner.DefaultMutators(),
-		Workers:     workers,
-		Seed:        seed,
-		Shuffle:     shuffle,
-		Timeout:     timeout,
-		DBPath:      dbPath,
-		Targeted:    targeted,
+		Verbose:         verbose,
+		MutationDir:     mutationDir,
+		Mutators:        runner.DefaultMutators(),
+		Workers:         workers,
+		Seed:            seed,
+		Shuffle:         shuffle,
+		Timeout:         timeout,
+		DBPath:          dbPath,
+		Targeted:        isTargeted,
+		AdaptiveTimeout: adaptiveTimeout,
 	}
 
 	report, err := runner.Run(patterns, config)

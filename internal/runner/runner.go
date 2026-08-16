@@ -18,7 +18,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/danicat/selene/internal/mutator"
@@ -40,16 +39,17 @@ type ParsedFile struct {
 }
 
 type Config struct {
-	Verbose     bool
-	MutationDir string
-	Mutators    []mutator.Mutator
-	Workers     int
-	Seed        int64
-	Shuffle     bool
-	Timeout     time.Duration
-	DBPath      string
-	Targeted    bool
-	TestIndex   TestIndex
+	Verbose         bool
+	MutationDir     string
+	Mutators        []mutator.Mutator
+	Workers         int
+	Seed            int64
+	Shuffle         bool
+	Timeout         time.Duration
+	DBPath          string
+	Targeted        bool
+	TestIndex       TestIndex
+	AdaptiveTimeout bool
 }
 
 type Report struct {
@@ -58,9 +58,11 @@ type Report struct {
 	Timeouts      int
 	Survived      int
 	Uncovered     int
+	Excluded      int
 	BuildFailures int
 	TestKills     map[string][]string // test name -> list of mutation IDs
 	ExecutedTests map[string]bool     // all executed test/subtest names
+	ExcludedList  []ExcludedMutant    // analytics on excluded mutations
 }
 
 func (r Report) Score() float64 {
@@ -107,12 +109,13 @@ func findModuleRoot(dir string) string {
 }
 
 type mutationResult struct {
-	status        string // "killed", "survived", "uncovered", "killed (timeout)", "build_failure"
+	status        string // "killed", "survived", "uncovered", "killed (timeout)", "build_failure", "excluded"
 	mutID         string
 	mutator       string
 	filename      string
 	line          int
 	col           int
+	reason        string
 	buildFailures int
 	killedBy      []string
 	executed      []string
@@ -253,6 +256,17 @@ func Run(patterns []string, config Config) (*Report, error) {
 			case "uncovered":
 				report.Uncovered++
 				displayStatus = "survived (uncovered)"
+			case "excluded":
+				report.Excluded++
+				report.ExcludedList = append(report.ExcludedList, ExcludedMutant{
+					MutantID: res.mutID,
+					Mutator:  res.mutator,
+					File:     res.filename,
+					Line:     res.line,
+					Col:      res.col,
+					Reason:   res.reason,
+				})
+				displayStatus = fmt.Sprintf("safety-excluded (%s)", res.reason)
 			}
 
 			report.BuildFailures += res.buildFailures
@@ -328,7 +342,13 @@ func Run(patterns []string, config Config) (*Report, error) {
 					}
 				}
 
-				ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+				testTimeout := config.Timeout
+				if config.AdaptiveTimeout && config.TestIndex != nil {
+					expectedDuration := config.TestIndex.GetExpectedDuration(t.filename, pos.Line)
+					testTimeout = CalculateAdaptiveTimeout(expectedDuration, config.Timeout)
+				}
+
+				ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 				events, err := runGoTest(ctx, pkgDir, overlayPath, runFilter)
 				cancel()
 
@@ -385,11 +405,32 @@ func Run(patterns []string, config Config) (*Report, error) {
 			continue
 		}
 
+		exclusions := mutator.BuildDestructiveExclusionSet(pf.File, pf.Fset)
+
 		ast.Inspect(pf.File, func(n ast.Node) bool {
+			if n == nil {
+				return true
+			}
 			for _, m := range config.Mutators {
 				muts := m.Check(n)
 				for _, mut := range muts {
 					pos := pf.Fset.Position(mut.Pos)
+
+					// Check if this AST node is excluded for safety
+					if reason, isExcluded := exclusions[n]; isExcluded {
+						results <- mutationResult{
+							status:   "excluded",
+							mutID:    mut.ID,
+							mutator:  m.Name(),
+							filename: filename,
+							line:     pos.Line,
+							col:      pos.Column,
+							reason:   reason,
+							killedBy: []string{reason},
+						}
+						continue
+					}
+
 					if !coverage.IsCovered(filename, pos.Line) {
 						results <- mutationResult{
 							status:   "uncovered",
@@ -460,11 +501,11 @@ func Run(patterns []string, config Config) (*Report, error) {
 				KilledMutantIDs: stats.AggregatedKills[gt],
 			})
 		}
-		for _, bt := range stats.BadTests {
+		for _, zkt := range stats.ZeroKillTests {
 			testRecords = append(testRecords, TestRecord{
-				TestName:        bt,
+				TestName:        zkt,
 				Package:         pkgName,
-				Status:          "bad",
+				Status:          "zero_kills",
 				MutationsKilled: 0,
 			})
 		}
@@ -527,7 +568,7 @@ func runGoTest(ctx context.Context, pkgDir, overlay, runFilter string) ([]TestEv
 
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = pkgDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureProcessGroup(cmd)
 
 	var out []byte
 	var err error
@@ -540,10 +581,7 @@ func runGoTest(ctx context.Context, pkgDir, overlay, runFilter string) ([]TestEv
 
 	select {
 	case <-ctx.Done():
-		if cmd.Process != nil {
-			// Kill the entire process group
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		_ = killProcessGroup(cmd)
 		return nil, ctx.Err()
 	case <-done:
 		if err != nil && len(out) == 0 {

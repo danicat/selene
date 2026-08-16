@@ -327,21 +327,21 @@ func TestE2E_SQLiteDB_PopulationAndViews(t *testing.T) {
 		}
 	}
 
-	// 3. Verify selene_bad_tests view
-	badTests, err := db.QueryBadTests()
+	// 3. Verify selene_zero_kill_tests view
+	zeroKillTests, err := db.QueryZeroKillTests()
 	if err != nil {
-		t.Fatalf("QueryBadTests failed: %v", err)
+		t.Fatalf("QueryZeroKillTests failed: %v", err)
 	}
 
-	// TestIneffective should be classified as a bad test because it didn't assert
+	// TestIneffective should be classified as a zero-kill test because it didn't assert
 	foundIneffective := false
-	for _, bt := range badTests {
-		if strings.Contains(bt.TestName, "TestIneffective") {
+	for _, zkt := range zeroKillTests {
+		if strings.Contains(zkt.TestName, "TestIneffective") {
 			foundIneffective = true
 		}
 	}
 	if !foundIneffective {
-		t.Errorf("expected TestIneffective in selene_bad_tests view, got: %+v", badTests)
+		t.Errorf("expected TestIneffective in selene_zero_kill_tests view, got: %+v", zeroKillTests)
 	}
 }
 
@@ -457,7 +457,112 @@ func TestSlowMultiply(t *testing.T) {
 	t.Logf("Speedup factor: %.2fx", float64(durationUntargeted)/float64(durationTargeted))
 }
 
-// 5. Concurrency stress test for high worker counts (workers=8)
+// 5. Exact subtest targeting vs parent-level table run benchmark
+func TestE2E_SubtestTargeting_Speedup(t *testing.T) {
+	dir := t.TempDir()
+
+	goMod := `module example.com/subtestspeed
+go 1.20
+`
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatalf("failed to write go.mod: %v", err)
+	}
+
+	src := `package subtestspeed
+
+func Op1(a, b int) int {
+	return a + b
+}
+
+func Op2(a, b int) int {
+	return a * b
+}
+`
+	srcPath := filepath.Join(dir, "math.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		t.Fatalf("failed to write math.go: %v", err)
+	}
+
+	// Table test with 5 subtests, each doing simulated work (15ms)
+	testSrc := `package subtestspeed
+
+import (
+	"testing"
+	"time"
+)
+
+func TestTable(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func() bool
+	}{
+		{"Case1_Op1", func() bool { time.Sleep(15 * time.Millisecond); return Op1(2, 3) == 5 }},
+		{"Case2_Unrelated1", func() bool { time.Sleep(15 * time.Millisecond); return true }},
+		{"Case3_Unrelated2", func() bool { time.Sleep(15 * time.Millisecond); return true }},
+		{"Case4_Unrelated3", func() bool { time.Sleep(15 * time.Millisecond); return true }},
+		{"Case5_Unrelated4", func() bool { time.Sleep(15 * time.Millisecond); return true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.fn() {
+				t.Fail()
+			}
+		})
+	}
+}
+`
+	testPath := filepath.Join(dir, "math_test.go")
+	if err := os.WriteFile(testPath, []byte(testSrc), 0644); err != nil {
+		t.Fatalf("failed to write math_test.go: %v", err)
+	}
+
+	mutators := []mutator.Mutator{&mutator.ArithmeticMutator{}}
+
+	// A. Parent-level targeting (runs the whole TestTable harness with all 5 cases = 75ms per run)
+	idxParent := NewMemoryTestIndex()
+	idxParent.AddCoverage(srcPath, 3, 5, "TestTable")
+	configParent := Config{
+		MutationDir: filepath.Join(dir, "mut-parent"),
+		Mutators:    mutators,
+		Workers:     1,
+		Timeout:     5 * time.Second,
+		Targeted:    true,
+		TestIndex:   idxParent,
+	}
+
+	startParent := time.Now()
+	reportParent, err := Run([]string{srcPath}, configParent)
+	durationParent := time.Since(startParent)
+	if err != nil {
+		t.Fatalf("Parent-level targeted run failed: %v", err)
+	}
+
+	// B. Exact subtest targeting (runs ONLY TestTable/Case1_Op1 = 15ms per run)
+	idxSub := NewMemoryTestIndex()
+	idxSub.AddCoverage(srcPath, 3, 5, "TestTable/Case1_Op1")
+	configSub := Config{
+		MutationDir: filepath.Join(dir, "mut-subtest"),
+		Mutators:    mutators,
+		Workers:     1,
+		Timeout:     5 * time.Second,
+		Targeted:    true,
+		TestIndex:   idxSub,
+	}
+
+	startSub := time.Now()
+	reportSub, err := Run([]string{srcPath}, configSub)
+	durationSub := time.Since(startSub)
+	if err != nil {
+		t.Fatalf("Exact subtest targeted run failed: %v", err)
+	}
+
+	t.Logf("Parent-level table duration: %v (Killed=%d)", durationParent, reportParent.Killed)
+	t.Logf("Exact subtest duration:       %v (Killed=%d)", durationSub, reportSub.Killed)
+	speedup := float64(durationParent) / float64(durationSub)
+	t.Logf("Subtest targeting speedup factor: %.2fx", speedup)
+}
+
+// 6. Concurrency stress test for high worker counts (workers=8)
 func TestE2E_ConcurrentWorkerPoolStress(t *testing.T) {
 	dir, srcPath, _ := setupIntegrationProject(t)
 

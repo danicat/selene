@@ -29,7 +29,7 @@ func TestInitDB(t *testing.T) {
 	}
 
 	// Verify views exist
-	views := []string{"selene_survived", "selene_zero_kill_tests", "selene_bad_tests", "selene_summary"}
+	views := []string{"selene_survived", "selene_excluded", "selene_zero_kill_tests", "selene_summary"}
 	for _, view := range views {
 		var name string
 		err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='view' AND name=?", view).Scan(&name)
@@ -95,6 +95,15 @@ func TestWriteResultsAndViews(t *testing.T) {
 			Status:   "build_failure",
 			KilledBy: nil,
 		},
+		{
+			ID:       "mut-6",
+			Mutator:  "string_literal",
+			File:     "cleanup.go",
+			Line:     12,
+			Col:      15,
+			Status:   "excluded",
+			KilledBy: []string{"argument to os.RemoveAll"},
+		},
 	}
 
 	tests := []TestRecord{
@@ -123,8 +132,8 @@ func TestWriteResultsAndViews(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM selene").Scan(&count); err != nil {
 		t.Fatalf("count query failed: %v", err)
 	}
-	if count != 5 {
-		t.Errorf("expected 5 mutations, got %d", count)
+	if count != 6 {
+		t.Errorf("expected 6 mutations, got %d", count)
 	}
 
 	var killedBy string
@@ -161,7 +170,19 @@ func TestWriteResultsAndViews(t *testing.T) {
 		t.Errorf("expected survived IDs ['mut-2'], got %v", survivedIDs)
 	}
 
-	// 3. Verify selene_zero_kill_tests view and QueryZeroKillTests
+	// 3. Verify selene_excluded view and QueryExcluded
+	excludedRecords, err := QueryExcluded(db)
+	if err != nil {
+		t.Fatalf("QueryExcluded failed: %v", err)
+	}
+	if len(excludedRecords) != 1 || excludedRecords[0].ID != "mut-6" {
+		t.Errorf("expected excluded record 'mut-6', got %+v", excludedRecords)
+	}
+	if len(excludedRecords[0].KilledBy) == 0 || excludedRecords[0].KilledBy[0] != "argument to os.RemoveAll" {
+		t.Errorf("expected reason 'argument to os.RemoveAll', got %+v", excludedRecords[0].KilledBy)
+	}
+
+	// 4. Verify selene_zero_kill_tests view and QueryZeroKillTests
 	zeroKillRecords, err := QueryZeroKillTests(db)
 	if err != nil {
 		t.Fatalf("QueryZeroKillTests failed: %v", err)
@@ -170,35 +191,13 @@ func TestWriteResultsAndViews(t *testing.T) {
 		t.Errorf("expected zero kill test 'TestUseless', got %+v", zeroKillRecords)
 	}
 
-	// Verify selene_bad_tests view (compatibility alias)
-	badRows, err := db.Query("SELECT test_name, package FROM selene_bad_tests")
-	if err != nil {
-		t.Fatalf("failed to query selene_bad_tests: %v", err)
-	}
-	defer badRows.Close()
-
-	var badTests []string
-	for badRows.Next() {
-		var name, pkg string
-		if err := badRows.Scan(&name, &pkg); err != nil {
-			t.Fatalf("failed to scan bad test: %v", err)
-		}
-		badTests = append(badTests, name)
-		if pkg != "example.com/pkg" {
-			t.Errorf("expected package example.com/pkg, got %s", pkg)
-		}
-	}
-	if !reflect.DeepEqual(badTests, []string{"TestUseless"}) {
-		t.Errorf("expected bad tests ['TestUseless'], got %v", badTests)
-	}
-
-	// 4. Verify selene_summary view
+	// 5. Verify selene_summary view
 	summary, err := QuerySummary(db)
 	if err != nil {
 		t.Fatalf("QuerySummary failed: %v", err)
 	}
-	if summary.TotalMutations != 5 {
-		t.Errorf("expected total 5, got %d", summary.TotalMutations)
+	if summary.TotalMutations != 6 {
+		t.Errorf("expected total 6, got %d", summary.TotalMutations)
 	}
 	if summary.Killed != 1 {
 		t.Errorf("expected killed 1, got %d", summary.Killed)
@@ -211,6 +210,9 @@ func TestWriteResultsAndViews(t *testing.T) {
 	}
 	if summary.Timeouts != 1 {
 		t.Errorf("expected timeouts 1, got %d", summary.Timeouts)
+	}
+	if summary.SafetyExcluded != 1 {
+		t.Errorf("expected safety_excluded 1, got %d", summary.SafetyExcluded)
 	}
 }
 

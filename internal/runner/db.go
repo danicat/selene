@@ -37,6 +37,7 @@ type SummaryRecord struct {
 	Survived       int `json:"survived"`
 	Uncovered      int `json:"uncovered"`
 	Timeouts       int `json:"timeouts"`
+	SafetyExcluded int `json:"safety_excluded"`
 }
 
 // SchemaDDL defines the SQLite tables and diagnosis views for Selene.
@@ -59,22 +60,27 @@ CREATE TABLE IF NOT EXISTS selene_tests (
     killed_mutant_ids TEXT
 );
 
-CREATE VIEW IF NOT EXISTS selene_survived AS
+DROP VIEW IF EXISTS selene_survived;
+CREATE VIEW selene_survived AS
     SELECT id, mutator, file, line, col FROM selene WHERE status = 'survived';
 
-CREATE VIEW IF NOT EXISTS selene_zero_kill_tests AS
+DROP VIEW IF EXISTS selene_excluded;
+CREATE VIEW selene_excluded AS
+    SELECT id, mutator, file, line, col, killed_by as reason FROM selene WHERE status = 'excluded';
+
+DROP VIEW IF EXISTS selene_zero_kill_tests;
+CREATE VIEW selene_zero_kill_tests AS
     SELECT test_name, package FROM selene_tests WHERE mutations_killed = 0;
 
-CREATE VIEW IF NOT EXISTS selene_bad_tests AS
-    SELECT test_name, package FROM selene_zero_kill_tests;
-
-CREATE VIEW IF NOT EXISTS selene_summary AS
+DROP VIEW IF EXISTS selene_summary;
+CREATE VIEW selene_summary AS
     SELECT 
         count(*) as total_mutations,
         sum(case when status = 'killed' then 1 else 0 end) as killed,
         sum(case when status = 'survived' then 1 else 0 end) as survived,
         sum(case when status = 'uncovered' then 1 else 0 end) as uncovered,
-        sum(case when status = 'timeout' then 1 else 0 end) as timeouts
+        sum(case when status = 'timeout' then 1 else 0 end) as timeouts,
+        sum(case when status = 'excluded' then 1 else 0 end) as safety_excluded
     FROM selene;
 `
 
@@ -168,10 +174,10 @@ func SaveResultsToDB(dbPath string, mutations []MutationRecord, tests []TestReco
 
 // QuerySummary executes a query on selene_summary and returns the aggregated metrics.
 func QuerySummary(db *sql.DB) (*SummaryRecord, error) {
-	row := db.QueryRow("SELECT total_mutations, killed, survived, uncovered, timeouts FROM selene_summary")
+	row := db.QueryRow("SELECT total_mutations, killed, survived, uncovered, timeouts, safety_excluded FROM selene_summary")
 	var s SummaryRecord
-	var killed, survived, uncovered, timeouts sql.NullInt64
-	if err := row.Scan(&s.TotalMutations, &killed, &survived, &uncovered, &timeouts); err != nil {
+	var killed, survived, uncovered, timeouts, safetyExcluded sql.NullInt64
+	if err := row.Scan(&s.TotalMutations, &killed, &survived, &uncovered, &timeouts, &safetyExcluded); err != nil {
 		return nil, fmt.Errorf("failed to query selene_summary: %w", err)
 	}
 	if killed.Valid {
@@ -185,6 +191,9 @@ func QuerySummary(db *sql.DB) (*SummaryRecord, error) {
 	}
 	if timeouts.Valid {
 		s.Timeouts = int(timeouts.Int64)
+	}
+	if safetyExcluded.Valid {
+		s.SafetyExcluded = int(safetyExcluded.Int64)
 	}
 	return &s, nil
 }
@@ -209,6 +218,30 @@ func QuerySurvived(db *sql.DB) ([]MutationRecord, error) {
 	return records, nil
 }
 
+// QueryExcluded queries the selene_excluded view.
+func QueryExcluded(db *sql.DB) ([]MutationRecord, error) {
+	rows, err := db.Query("SELECT id, mutator, file, line, col, reason FROM selene_excluded")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query selene_excluded: %w", err)
+	}
+	defer rows.Close()
+
+	var records []MutationRecord
+	for rows.Next() {
+		var r MutationRecord
+		var reason sql.NullString
+		if err := rows.Scan(&r.ID, &r.Mutator, &r.File, &r.Line, &r.Col, &reason); err != nil {
+			return nil, fmt.Errorf("failed to scan selene_excluded row: %w", err)
+		}
+		r.Status = "excluded"
+		if reason.Valid {
+			r.KilledBy = []string{reason.String}
+		}
+		records = append(records, r)
+	}
+	return records, nil
+}
+
 // QueryZeroKillTests queries the selene_zero_kill_tests view.
 func QueryZeroKillTests(db *sql.DB) ([]TestRecord, error) {
 	rows, err := db.Query("SELECT test_name, package FROM selene_zero_kill_tests")
@@ -227,11 +260,6 @@ func QueryZeroKillTests(db *sql.DB) ([]TestRecord, error) {
 		records = append(records, r)
 	}
 	return records, nil
-}
-
-// QueryBadTests queries the selene_bad_tests view (alias for QueryZeroKillTests).
-func QueryBadTests(db *sql.DB) ([]TestRecord, error) {
-	return QueryZeroKillTests(db)
 }
 
 // Database provides a high-level client for Selene's SQLite database operations.
@@ -279,12 +307,12 @@ func (d *Database) QuerySurvived() ([]MutationRecord, error) {
 	return QuerySurvived(db)
 }
 
-// QueryBadTests retrieves all non-assertive tests from the selene_bad_tests view.
-func (d *Database) QueryBadTests() ([]TestRecord, error) {
+// QueryZeroKillTests retrieves all non-assertive tests from the selene_zero_kill_tests view.
+func (d *Database) QueryZeroKillTests() ([]TestRecord, error) {
 	db, err := InitDB(d.path)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
-	return QueryBadTests(db)
+	return QueryZeroKillTests(db)
 }

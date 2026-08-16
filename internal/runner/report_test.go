@@ -179,15 +179,15 @@ func TestCalculateTestStats(t *testing.T) {
 		if !reflect.DeepEqual(stats.GoodTests, []string{"TestA", "TestB"}) {
 			t.Errorf("expected GoodTests [TestA, TestB], got %v", stats.GoodTests)
 		}
-		if len(stats.BadTests) != 0 {
-			t.Errorf("expected BadTests to be empty, got %v", stats.BadTests)
+		if len(stats.ZeroKillTests) != 0 {
+			t.Errorf("expected ZeroKillTests to be empty, got %v", stats.ZeroKillTests)
 		}
 		if stats.TestQualityScore != 100.0 {
 			t.Errorf("expected TestQualityScore 100.0, got %f", stats.TestQualityScore)
 		}
 	})
 
-	t.Run("all bad tests (0% score)", func(t *testing.T) {
+	t.Run("all zero kill tests (0% score)", func(t *testing.T) {
 		discoveredTests := []string{"TestA", "TestB"}
 		rawKills := map[string][]string{}
 		stats := CalculateTestStats(discoveredTests, rawKills)
@@ -198,15 +198,15 @@ func TestCalculateTestStats(t *testing.T) {
 		if len(stats.GoodTests) != 0 {
 			t.Errorf("expected GoodTests to be empty, got %v", stats.GoodTests)
 		}
-		if !reflect.DeepEqual(stats.BadTests, []string{"TestA", "TestB"}) {
-			t.Errorf("expected BadTests [TestA, TestB], got %v", stats.BadTests)
+		if !reflect.DeepEqual(stats.ZeroKillTests, []string{"TestA", "TestB"}) {
+			t.Errorf("expected ZeroKillTests [TestA, TestB], got %v", stats.ZeroKillTests)
 		}
 		if stats.TestQualityScore != 0.0 {
 			t.Errorf("expected TestQualityScore 0.0, got %f", stats.TestQualityScore)
 		}
 	})
 
-	t.Run("mixed good and bad tests", func(t *testing.T) {
+	t.Run("mixed good and zero kill tests", func(t *testing.T) {
 		discoveredTests := []string{"TestA", "TestB", "TestC", "TestD"}
 		rawKills := map[string][]string{
 			"TestA": {"mut1"},
@@ -220,8 +220,8 @@ func TestCalculateTestStats(t *testing.T) {
 		if !reflect.DeepEqual(stats.GoodTests, []string{"TestA", "TestC"}) {
 			t.Errorf("expected GoodTests [TestA, TestC], got %v", stats.GoodTests)
 		}
-		if !reflect.DeepEqual(stats.BadTests, []string{"TestB", "TestD"}) {
-			t.Errorf("expected BadTests [TestB, TestD], got %v", stats.BadTests)
+		if !reflect.DeepEqual(stats.ZeroKillTests, []string{"TestB", "TestD"}) {
+			t.Errorf("expected ZeroKillTests [TestB, TestD], got %v", stats.ZeroKillTests)
 		}
 		if stats.TestQualityScore != 50.0 {
 			t.Errorf("expected TestQualityScore 50.0, got %f", stats.TestQualityScore)
@@ -233,23 +233,23 @@ func TestCalculateTestStats(t *testing.T) {
 			"TestMutator",
 			"TestMutator/Sub1",
 			"TestMutator/Sub2",
-			"TestStandaloneBad",
+			"TestStandaloneZeroKill",
 		}
 		rawKills := map[string][]string{
 			"TestMutator/Sub1": {"mut1"},
 		}
 		stats := CalculateTestStats(discoveredTests, rawKills)
 
-		// Leaf tests: TestMutator/Sub1, TestMutator/Sub2, TestStandaloneBad (3 total, TestMutator excluded)
+		// Leaf tests: TestMutator/Sub1, TestMutator/Sub2, TestStandaloneZeroKill (3 total, TestMutator excluded)
 		if stats.TotalTests != 3 {
 			t.Errorf("expected TotalTests 3, got %d", stats.TotalTests)
 		}
 		if !reflect.DeepEqual(stats.GoodTests, []string{"TestMutator/Sub1"}) {
 			t.Errorf("expected GoodTests [TestMutator/Sub1], got %v", stats.GoodTests)
 		}
-		expectedBad := []string{"TestMutator/Sub2", "TestStandaloneBad"}
-		if !reflect.DeepEqual(stats.BadTests, expectedBad) {
-			t.Errorf("expected BadTests %v, got %v", expectedBad, stats.BadTests)
+		expectedZeroKill := []string{"TestMutator/Sub2", "TestStandaloneZeroKill"}
+		if !reflect.DeepEqual(stats.ZeroKillTests, expectedZeroKill) {
+			t.Errorf("expected ZeroKillTests %v, got %v", expectedZeroKill, stats.ZeroKillTests)
 		}
 		expectedScore := (1.0 / 3.0) * 100.0
 		if math.Abs(stats.TestQualityScore-expectedScore) > 0.001 {
@@ -265,8 +265,8 @@ func TestCalculateTestStats(t *testing.T) {
 		if len(stats.GoodTests) != 0 {
 			t.Errorf("expected GoodTests empty, got %v", stats.GoodTests)
 		}
-		if len(stats.BadTests) != 0 {
-			t.Errorf("expected BadTests empty, got %v", stats.BadTests)
+		if len(stats.ZeroKillTests) != 0 {
+			t.Errorf("expected ZeroKillTests empty, got %v", stats.ZeroKillTests)
 		}
 		if stats.TestQualityScore != 0.0 {
 			t.Errorf("expected TestQualityScore 0.0, got %f", stats.TestQualityScore)
@@ -289,7 +289,7 @@ func TestJSONReport(t *testing.T) {
 	stats := TestStats{
 		TotalTests:       2,
 		GoodTests:        []string{"TestA"},
-		BadTests:         []string{"TestB"},
+		ZeroKillTests:    []string{"TestB"},
 		TestQualityScore: 50.0,
 		AggregatedKills: map[string][]string{
 			"TestA": {"mut1", "mut2"},
@@ -331,8 +331,8 @@ func TestJSONReport(t *testing.T) {
 		if !reflect.DeepEqual(parsed.GoodTests, []string{"TestA"}) {
 			t.Errorf("GoodTests = %v, want [TestA]", parsed.GoodTests)
 		}
-		if !reflect.DeepEqual(parsed.BadTests, []string{"TestB"}) {
-			t.Errorf("BadTests = %v, want [TestB]", parsed.BadTests)
+		if !reflect.DeepEqual(parsed.ZeroKillTests, []string{"TestB"}) {
+			t.Errorf("ZeroKillTests = %v, want [TestB]", parsed.ZeroKillTests)
 		}
 		if parsed.MutationScore != 80.0 {
 			t.Errorf("MutationScore = %f, want 80.0", parsed.MutationScore)
@@ -384,8 +384,8 @@ func TestJSONReport(t *testing.T) {
 		if parsed.TotalMutations != 0 || parsed.MutationScore != 0.0 {
 			t.Errorf("expected 0 for nil report, got %+v", parsed)
 		}
-		if parsed.GoodTests == nil || parsed.BadTests == nil {
-			t.Errorf("expected non-nil empty slices for GoodTests/BadTests, got %+v", parsed)
+		if parsed.GoodTests == nil || parsed.ZeroKillTests == nil {
+			t.Errorf("expected non-nil empty slices for GoodTests/ZeroKillTests, got %+v", parsed)
 		}
 	})
 }
@@ -402,7 +402,7 @@ func TestPrintHumanReport(t *testing.T) {
 	stats := TestStats{
 		TotalTests:       3,
 		GoodTests:        []string{"TestA", "TestB"},
-		BadTests:         []string{"TestC"},
+		ZeroKillTests:    []string{"TestC"},
 		TestQualityScore: 66.67,
 		AggregatedKills: map[string][]string{
 			"TestA": {"mut1", "mut2"},
@@ -470,7 +470,7 @@ func TestPrintHumanReport(t *testing.T) {
 		cleanStats := TestStats{
 			TotalTests:       1,
 			GoodTests:        []string{"TestA"},
-			BadTests:         []string{},
+			ZeroKillTests:    []string{},
 			TestQualityScore: 100.0,
 			AggregatedKills: map[string][]string{
 				"TestA": {"mut1"},
@@ -496,6 +496,60 @@ func TestPrintHumanReport(t *testing.T) {
 
 		if !strings.Contains(out, "Total mutations: 0") {
 			t.Errorf("expected Total mutations: 0, got:\n%s", out)
+		}
+	})
+
+	t.Run("safety-excluded report analytics", func(t *testing.T) {
+		safetyReport := &Report{
+			Total:     5,
+			Killed:    2,
+			Timeouts:  1,
+			Survived:  1,
+			Uncovered: 0,
+			Excluded:  1,
+			ExcludedList: []ExcludedMutant{
+				{
+					MutantID: "mut-safe-1",
+					Mutator:  "string_literal",
+					File:     "cleanup.go",
+					Line:     15,
+					Col:      8,
+					Reason:   "argument to os.RemoveAll",
+				},
+			},
+		}
+		safetyStats := TestStats{
+			TotalTests:       1,
+			GoodTests:        []string{"TestA"},
+			ZeroKillTests:    []string{},
+			TestQualityScore: 100.0,
+		}
+
+		var buf bytes.Buffer
+		PrintHumanReport(&buf, safetyReport, safetyStats, false)
+		out := buf.String()
+
+		if !strings.Contains(out, "Safety-excluded: 1") {
+			t.Errorf("expected output to contain 'Safety-excluded: 1', got:\n%s", out)
+		}
+		if !strings.Contains(out, "- cleanup.go:15:8: string_literal (argument to os.RemoveAll)") {
+			t.Errorf("expected output to contain excluded mutant details, got:\n%s", out)
+		}
+
+		// Verify JSON includes Excluded and ExcludedMutations
+		jsonData, err := FormatJSONReport(safetyReport, safetyStats, false)
+		if err != nil {
+			t.Fatalf("FormatJSONReport failed: %v", err)
+		}
+		var parsed JSONReport
+		if err := json.Unmarshal(jsonData, &parsed); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if parsed.Excluded != 1 {
+			t.Errorf("parsed.Excluded = %d, want 1", parsed.Excluded)
+		}
+		if len(parsed.ExcludedMutations) != 1 || parsed.ExcludedMutations[0].Reason != "argument to os.RemoveAll" {
+			t.Errorf("parsed.ExcludedMutations = %+v, want reason 'argument to os.RemoveAll'", parsed.ExcludedMutations)
 		}
 	})
 }

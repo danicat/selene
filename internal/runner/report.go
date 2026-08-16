@@ -97,12 +97,12 @@ func ExtractLeafTests(allTests []string) []string {
 type TestStats struct {
 	TotalTests       int                 `json:"total_tests"`
 	GoodTests        []string            `json:"good_tests"`
-	BadTests         []string            `json:"bad_tests"`
+	ZeroKillTests    []string            `json:"zero_kill_tests"`
 	TestQualityScore float64             `json:"test_quality_score"`
 	AggregatedKills  map[string][]string `json:"aggregated_kills,omitempty"`
 }
 
-// CalculateTestStats classifies tests into Good and Bad tests and computes TestQualityScore
+// CalculateTestStats classifies tests into Good and ZeroKill tests and computes TestQualityScore
 // based strictly on leaf tests (standalone tests and individual subtest cases).
 // Umbrella container tests (e.g. parent functions of table-driven tests) are excluded
 // from the total test denominator to prevent double-counting.
@@ -128,28 +128,29 @@ func CalculateTestStats(discoveredTests []string, rawKills map[string][]string) 
 
 	leafTests := ExtractLeafTests(candList)
 
-	goodMap := make(map[string]bool)
-	badMap := make(map[string]bool)
-
-	for _, leaf := range leafTests {
-		if kills, exists := rawKills[leaf]; exists && len(kills) > 0 {
-			goodMap[leaf] = true
-		} else {
-			badMap[leaf] = true
+	goodSet := make(map[string]bool)
+	for testName, kills := range rawKills {
+		if len(kills) > 0 {
+			goodSet[testName] = true
 		}
 	}
 
-	goodTests := make([]string, 0, len(goodMap))
-	for t := range goodMap {
-		goodTests = append(goodTests, t)
-	}
-	sort.Strings(goodTests)
+	var goodTests []string
+	var zeroKillTests []string
 
-	badTests := make([]string, 0, len(badMap))
-	for t := range badMap {
-		badTests = append(badTests, t)
+	for _, t := range leafTests {
+		if goodSet[t] {
+			goodTests = append(goodTests, t)
+			continue
+		}
+		parent := ParentTestName(t)
+		if goodSet[parent] {
+			goodTests = append(goodTests, t)
+			continue
+		}
+		zeroKillTests = append(zeroKillTests, t)
 	}
-	sort.Strings(badTests)
+	sort.Strings(zeroKillTests)
 
 	totalTests := len(leafTests)
 	qualityScore := 0.0
@@ -160,65 +161,80 @@ func CalculateTestStats(discoveredTests []string, rawKills map[string][]string) 
 	return TestStats{
 		TotalTests:       totalTests,
 		GoodTests:        goodTests,
-		BadTests:         badTests,
+		ZeroKillTests:    zeroKillTests,
 		TestQualityScore: qualityScore,
 		AggregatedKills:  rawKills,
 	}
 }
 
+// ExcludedMutant represents metadata and reason for a safety-excluded mutation.
+type ExcludedMutant struct {
+	MutantID string `json:"mutant_id"`
+	Mutator  string `json:"mutator"`
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Col      int    `json:"col"`
+	Reason   string `json:"reason"`
+}
+
 // JSONReport represents the structured JSON output for mutation testing results.
 type JSONReport struct {
-	TotalMutations   int                 `json:"total_mutations"`
-	Killed           int                 `json:"killed"`
-	Survived         int                 `json:"survived"`
-	Timeouts         int                 `json:"timeouts"`
-	Uncovered        int                 `json:"uncovered"`
-	BuildFailures    int                 `json:"build_failures,omitempty"`
-	TotalTests       int                 `json:"total_tests"`
-	GoodTests        []string            `json:"good_tests"`
-	ZeroKillTests    []string            `json:"zero_kill_tests"`
-	BadTests         []string            `json:"bad_tests"`
-	MutationScore    float64             `json:"mutation_score"`
-	TestQualityScore float64             `json:"test_quality_score"`
-	TestKills        map[string][]string `json:"test_kills,omitempty"`
+	TotalMutations    int                 `json:"total_mutations"`
+	Killed            int                 `json:"killed"`
+	Survived          int                 `json:"survived"`
+	Timeouts          int                 `json:"timeouts"`
+	Uncovered         int                 `json:"uncovered"`
+	Excluded          int                 `json:"excluded"`
+	BuildFailures     int                 `json:"build_failures,omitempty"`
+	TotalTests        int                 `json:"total_tests"`
+	GoodTests         []string            `json:"good_tests"`
+	ZeroKillTests     []string            `json:"zero_kill_tests"`
+	MutationScore     float64             `json:"mutation_score"`
+	TestQualityScore  float64             `json:"test_quality_score"`
+	TestKills         map[string][]string `json:"test_kills,omitempty"`
+	ExcludedMutations []ExcludedMutant    `json:"excluded_mutations,omitempty"`
 }
 
 // NewJSONReport constructs a JSONReport from Report and TestStats.
 func NewJSONReport(report *Report, stats TestStats, verbose bool) JSONReport {
-	var totalMut, killed, survived, timeouts, uncovered, buildFailures int
+	var totalMut, killed, survived, timeouts, uncovered, excluded, buildFailures int
 	var mutScore float64
+	var excludedList []ExcludedMutant
 	if report != nil {
 		totalMut = report.Total
 		killed = report.Killed
 		survived = report.Survived
 		timeouts = report.Timeouts
 		uncovered = report.Uncovered
+		excluded = report.Excluded
 		buildFailures = report.BuildFailures
 		mutScore = report.Score()
+		excludedList = report.ExcludedList
 	}
 
 	goodTests := stats.GoodTests
 	if goodTests == nil {
 		goodTests = []string{}
 	}
-	badTests := stats.BadTests
-	if badTests == nil {
-		badTests = []string{}
+	zeroKillTests := stats.ZeroKillTests
+	if zeroKillTests == nil {
+		zeroKillTests = []string{}
 	}
 
 	jr := JSONReport{
-		TotalMutations:   totalMut,
-		Killed:           killed,
-		Survived:         survived,
-		Timeouts:         timeouts,
-		Uncovered:        uncovered,
-		BuildFailures:    buildFailures,
-		TotalTests:       stats.TotalTests,
-		GoodTests:        goodTests,
-		ZeroKillTests:    badTests,
-		BadTests:         badTests,
-		MutationScore:    mutScore,
-		TestQualityScore: stats.TestQualityScore,
+		TotalMutations:    totalMut,
+		Killed:            killed,
+		Survived:          survived,
+		Timeouts:          timeouts,
+		Uncovered:         uncovered,
+		Excluded:          excluded,
+		BuildFailures:     buildFailures,
+		TotalTests:        stats.TotalTests,
+		GoodTests:         goodTests,
+		ZeroKillTests:     zeroKillTests,
+		MutationScore:     mutScore,
+		TestQualityScore:  stats.TestQualityScore,
+		ExcludedMutations: excludedList,
 	}
 
 	if verbose {
@@ -240,7 +256,7 @@ func FormatJSONReport(report *Report, stats TestStats, verbose bool) ([]byte, er
 
 // PrintHumanReport formats and prints human-readable mutation testing summary to w.
 func PrintHumanReport(w io.Writer, report *Report, stats TestStats, verbose bool) {
-	var totalMut, killed, timeouts, survived, uncovered, buildFailures int
+	var totalMut, killed, timeouts, survived, uncovered, excluded, buildFailures int
 	var mutScore float64
 	if report != nil {
 		totalMut = report.Total
@@ -248,6 +264,7 @@ func PrintHumanReport(w io.Writer, report *Report, stats TestStats, verbose bool
 		timeouts = report.Timeouts
 		survived = report.Survived
 		uncovered = report.Uncovered
+		excluded = report.Excluded
 		buildFailures = report.BuildFailures
 		mutScore = report.Score()
 	}
@@ -257,17 +274,27 @@ func PrintHumanReport(w io.Writer, report *Report, stats TestStats, verbose bool
 	fmt.Fprintf(w, "Timeouts:        %d\n", timeouts)
 	fmt.Fprintf(w, "Survived:        %d\n", survived)
 	fmt.Fprintf(w, "Uncovered:       %d\n", uncovered)
+	if excluded > 0 {
+		fmt.Fprintf(w, "Safety-excluded: %d\n", excluded)
+	}
 	if buildFailures > 0 {
 		fmt.Fprintf(w, "Build Failures:  %d\n", buildFailures)
 	}
 
+	if report != nil && len(report.ExcludedList) > 0 {
+		fmt.Fprintln(w, "\nSafety-excluded mutations:")
+		for _, ex := range report.ExcludedList {
+			fmt.Fprintf(w, "- %s:%d:%d: %s (%s)\n", ex.File, ex.Line, ex.Col, ex.Mutator, ex.Reason)
+		}
+	}
+
 	fmt.Fprintf(w, "\nTotal tests:     %d\n", stats.TotalTests)
 	fmt.Fprintf(w, "Good tests:      %d\n", len(stats.GoodTests))
-	fmt.Fprintf(w, "Zero-kill tests: %d\n", len(stats.BadTests))
+	fmt.Fprintf(w, "Zero-kill tests: %d\n", len(stats.ZeroKillTests))
 
-	if len(stats.BadTests) > 0 {
+	if len(stats.ZeroKillTests) > 0 {
 		fmt.Fprintln(w, "\nZero-kill tests (caught 0 mutations):")
-		for _, test := range stats.BadTests {
+		for _, test := range stats.ZeroKillTests {
 			fmt.Fprintf(w, "- %s\n", test)
 		}
 	}

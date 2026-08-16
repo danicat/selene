@@ -21,7 +21,7 @@ TestQuery (`tq`) and Selene work hand-in-hand to provide ultra-fast, database-dr
 
 1. **Coverage Profiling**: `tq build ./...` analyzes the codebase and populates `testquery.db` with detailed, statement-level test execution coverage (`test_coverage` table).
 2. **Targeted Mutation Testing**: Selene reads `testquery.db` via `--db testquery.db` and indexes which tests cover each line in memory (`TestIndex`). When evaluating a mutant on a specific line, Selene executes **only the tests that cover that line** using `-run '^(TestA|TestB)$'`.
-3. **Results Persistence**: Selene writes all mutant outcomes and test effectiveness rankings directly back into SQLite, creating tables (`selene`, `selene_tests`) and diagnostic views (`selene_survived`, `selene_bad_tests`, `selene_summary`).
+3. **Results Persistence**: Selene writes all mutant outcomes and test effectiveness rankings directly back into SQLite, creating tables (`selene`, `selene_tests`) and diagnostic views (`selene_survived`, `selene_zero_kill_tests`, `selene_summary`).
 
 ---
 
@@ -69,7 +69,6 @@ List all tests that executed during test runs but caught 0 mutations in this run
 SELECT test_name, package 
 FROM selene_zero_kill_tests;
 ```
-*(Note: `selene_bad_tests` is maintained as a backward-compatible alias view).*
 
 ### 3. Top Most Effective Tests
 Rank tests by the number of mutants they successfully killed:
@@ -81,7 +80,14 @@ ORDER BY mutations_killed DESC
 LIMIT 10;
 ```
 
-### 4. Overall Session Summary
+### 4. Inspect Safety-Excluded Mutations
+Inspect mutations pruned automatically for host safety (e.g., arguments and guards to `os.RemoveAll`, `exec.Command`, etc.):
+```sql
+SELECT id, mutator, file, line, col, reason 
+FROM selene_excluded;
+```
+
+### 5. Overall Session Summary
 Query aggregated mutation testing statistics:
 ```sql
 SELECT * FROM selene_summary;
