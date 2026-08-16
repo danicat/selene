@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"go/ast"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,9 +16,7 @@ type MockMutator struct {
 }
 
 func (m *MockMutator) Name() string { return m.NameVal }
-func (m *MockMutator) Check(n any) []mutator.Mutation {
-	// In a real test we'd need valid AST node, but our runner parses files.
-	// We'll create a simple valid file test.
+func (m *MockMutator) Check(n ast.Node) []mutator.Mutation {
 	return nil
 }
 
@@ -166,5 +165,278 @@ func TestParseGoTestOutputError(t *testing.T) {
 	_, err := parseGoTestOutput([]byte(`{"Action": "run"} invalid`))
 	if err == nil {
 		t.Error("expected error for invalid json")
+	}
+}
+
+func TestRun_ParallelWorkers(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/parallel\n\ngo 1.20\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := `package parallel
+
+func Add(a, b int) int {
+	return a + b
+}
+
+func Sub(a, b int) int {
+	return a - b
+}
+
+func Mul(a, b int) int {
+	return a * b
+}
+`
+	srcPath := filepath.Join(tmpDir, "math.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testSrc := `package parallel
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if Add(2, 3) != 5 {
+		t.Fail()
+	}
+}
+
+func TestSub(t *testing.T) {
+	if Sub(5, 3) != 2 {
+		t.Fail()
+	}
+}
+
+func TestMul(t *testing.T) {
+	if Mul(2, 3) != 6 {
+		t.Fail()
+	}
+}
+`
+	testPath := filepath.Join(tmpDir, "math_test.go")
+	if err := os.WriteFile(testPath, []byte(testSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mutDir := filepath.Join(tmpDir, "mut")
+	config := Config{
+		MutationDir: mutDir,
+		Mutators:    []mutator.Mutator{&mutator.ArithmeticMutator{}},
+		Workers:     4,
+		Timeout:     5 * time.Second,
+	}
+
+	report, err := Run([]string{srcPath}, config)
+	if err != nil {
+		t.Fatalf("Run with 4 workers failed: %v", err)
+	}
+
+	if report.Total != 3 {
+		t.Errorf("expected 3 mutations, got %d", report.Total)
+	}
+	if report.Killed != 3 {
+		t.Errorf("expected 3 killed mutations, got %d", report.Killed)
+	}
+}
+
+func TestRun_TimeoutHandling(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/spin\n\ngo 1.20\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := `package spin
+
+import "time"
+
+func Spin(loop bool) int {
+	if loop {
+		for {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return 42
+}
+`
+	srcPath := filepath.Join(tmpDir, "spin.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testSrc := `package spin
+
+import "testing"
+
+func TestSpin(t *testing.T) {
+	if Spin(false) != 42 {
+		t.Fail()
+	}
+}
+`
+	testPath := filepath.Join(tmpDir, "spin_test.go")
+	if err := os.WriteFile(testPath, []byte(testSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mutDir := filepath.Join(tmpDir, "mut")
+	config := Config{
+		MutationDir: mutDir,
+		Mutators:    []mutator.Mutator{&mutator.ReverseIfCond{}},
+		Workers:     1,
+		Timeout:     500 * time.Millisecond,
+	}
+
+	report, err := Run([]string{srcPath}, config)
+	if err != nil {
+		t.Fatalf("Run timeout test failed: %v", err)
+	}
+
+	if report.Timeouts != 1 {
+		t.Errorf("expected 1 timeout mutation, got %d (killed: %d)", report.Timeouts, report.Killed)
+	}
+}
+
+func TestRun_TargetedExecution(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/targeted\n\ngo 1.20\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := `package targeted
+
+func FastAdd(a, b int) int {
+	return a + b
+}
+
+func SlowMultiply(a, b int) int {
+	return a * b
+}
+`
+	srcPath := filepath.Join(tmpDir, "math.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testSrc := `package targeted
+
+import (
+	"testing"
+	"time"
+)
+
+func TestFastAdd(t *testing.T) {
+	if FastAdd(1, 2) != 3 {
+		t.Fail()
+	}
+}
+
+func TestSlowMultiply(t *testing.T) {
+	time.Sleep(50 * time.Millisecond)
+	if SlowMultiply(2, 3) != 6 {
+		t.Fail()
+	}
+}
+`
+	testPath := filepath.Join(tmpDir, "math_test.go")
+	if err := os.WriteFile(testPath, []byte(testSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	idx := NewMemoryTestIndex()
+	idx.AddCoverage(srcPath, 3, 5, "TestFastAdd")
+	idx.AddCoverage(srcPath, 7, 9, "TestSlowMultiply")
+
+	mutDir := filepath.Join(tmpDir, "mut")
+	config := Config{
+		MutationDir: mutDir,
+		Mutators:    []mutator.Mutator{&mutator.ArithmeticMutator{}},
+		Workers:     2,
+		Timeout:     5 * time.Second,
+		Targeted:    true,
+		TestIndex:   idx,
+	}
+
+	report, err := Run([]string{srcPath}, config)
+	if err != nil {
+		t.Fatalf("Run targeted failed: %v", err)
+	}
+
+	if report.Total != 2 {
+		t.Errorf("expected 2 mutations, got %d", report.Total)
+	}
+	if report.Killed != 2 {
+		t.Errorf("expected 2 killed mutations, got %d", report.Killed)
+	}
+}
+
+func TestRun_DBPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/dbtest\n\ngo 1.20\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := `package dbtest
+
+func Incr(x int) int {
+	return x + 1
+}
+`
+	srcPath := filepath.Join(tmpDir, "calc.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testSrc := `package dbtest
+
+import "testing"
+
+func TestIncr(t *testing.T) {
+	if Incr(2) != 3 {
+		t.Fail()
+	}
+}
+`
+	testPath := filepath.Join(tmpDir, "calc_test.go")
+	if err := os.WriteFile(testPath, []byte(testSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(tmpDir, "testquery.db")
+	mutDir := filepath.Join(tmpDir, "mut")
+
+	config := Config{
+		MutationDir: mutDir,
+		Mutators:    []mutator.Mutator{&mutator.ArithmeticMutator{}},
+		Workers:     1,
+		Timeout:     5 * time.Second,
+		DBPath:      dbPath,
+	}
+
+	report, err := Run([]string{srcPath}, config)
+	if err != nil {
+		t.Fatalf("Run with DB persistence failed: %v", err)
+	}
+
+	db := NewDatabase(dbPath)
+	summary, err := db.QuerySummary()
+	if err != nil {
+		t.Fatalf("QuerySummary failed: %v", err)
+	}
+
+	if summary.TotalMutations != report.Total {
+		t.Errorf("DB total (%d) != report total (%d)", summary.TotalMutations, report.Total)
+	}
+	if summary.Killed != report.Killed {
+		t.Errorf("DB killed (%d) != report killed (%d)", summary.Killed, report.Killed)
 	}
 }

@@ -47,6 +47,9 @@ type Config struct {
 	Seed        int64
 	Shuffle     bool
 	Timeout     time.Duration
+	DBPath      string
+	Targeted    bool
+	TestIndex   TestIndex
 }
 
 type Report struct {
@@ -57,6 +60,7 @@ type Report struct {
 	Uncovered     int
 	BuildFailures int
 	TestKills     map[string][]string // test name -> list of mutation IDs
+	ExecutedTests map[string]bool     // all executed test/subtest names
 }
 
 func (r Report) Score() float64 {
@@ -64,6 +68,23 @@ func (r Report) Score() float64 {
 		return 0
 	}
 	return float64(r.Killed+r.Timeouts) / float64(r.Total) * 100
+}
+
+// DefaultMutators returns all registered mutators.
+func DefaultMutators() []mutator.Mutator {
+	return []mutator.Mutator{
+		&mutator.ReverseIfCond{},
+		&mutator.ArithmeticMutator{},
+		&mutator.ComparisonMutator{},
+		&mutator.BooleanMutator{},
+		&mutator.ConditionalsBoundaryMutator{},
+		&mutator.IncrementDecrementMutator{},
+		&mutator.BooleanLiteralMutator{},
+		&mutator.IntegerLiteralMutator{},
+		&mutator.StringLiteralMutator{},
+		&mutator.AssignmentMutator{},
+		&mutator.BitwiseMutator{},
+	}
 }
 
 // findModuleRoot looks for the directory containing go.mod starting from dir.
@@ -86,24 +107,24 @@ func findModuleRoot(dir string) string {
 }
 
 type mutationResult struct {
-	status        string // "killed", "survived", "uncovered"
+	status        string // "killed", "survived", "uncovered", "killed (timeout)", "build_failure"
 	mutID         string
+	mutator       string
 	filename      string
 	line          int
 	col           int
 	buildFailures int
 	killedBy      []string
+	executed      []string
 }
 
 // Run executes the mutation testing process.
 func Run(patterns []string, config Config) (*Report, error) {
-
 	if len(patterns) == 0 {
 		return nil, fmt.Errorf("no patterns provided")
 	}
 
 	if config.Workers <= 0 {
-
 		config.Workers = runtime.NumCPU()
 	}
 
@@ -112,10 +133,13 @@ func Run(patterns []string, config Config) (*Report, error) {
 	}
 
 	if config.Seed == 0 {
-
 		config.Seed = time.Now().UnixNano()
 	}
 	r := rand.New(rand.NewSource(config.Seed))
+
+	if len(config.Mutators) == 0 {
+		config.Mutators = DefaultMutators()
+	}
 
 	if config.Verbose {
 		fmt.Printf("Seed: %d\n", config.Seed)
@@ -124,34 +148,10 @@ func Run(patterns []string, config Config) (*Report, error) {
 		}
 	}
 
-	// 1. Path Expansion
-	var filenames []string
-	for _, arg := range patterns {
-		if strings.Contains(arg, "...") {
-			out, err := exec.Command("go", "list", "-f", "{{range .GoFiles}}{{.}} {{end}}", arg).Output()
-			if err != nil {
-				filenames = append(filenames, arg)
-				continue
-			}
-			dirOut, err := exec.Command("go", "list", "-f", "{{.Dir}}", arg).Output()
-			if err != nil {
-				filenames = append(filenames, arg)
-				continue
-			}
-			dirs := strings.Split(strings.TrimSpace(string(dirOut)), "\n")
-			fileLists := strings.Split(strings.TrimSpace(string(out)), "\n")
-			for i, fileList := range fileLists {
-				if i >= len(dirs) {
-					break
-				}
-				dir := dirs[i]
-				for _, f := range strings.Fields(fileList) {
-					filenames = append(filenames, filepath.Join(dir, f))
-				}
-			}
-		} else {
-			filenames = append(filenames, arg)
-		}
+	// 1. Path Resolution via ResolveTargets
+	targets, filenames, err := ResolveTargets(patterns)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve targets: %w", err)
 	}
 
 	if len(filenames) == 0 {
@@ -162,6 +162,29 @@ func Run(patterns []string, config Config) (*Report, error) {
 		r.Shuffle(len(filenames), func(i, j int) {
 			filenames[i], filenames[j] = filenames[j], filenames[i]
 		})
+	}
+
+	// Setup mutation directory if empty
+	if config.MutationDir == "" {
+		tmpDir, err := os.MkdirTemp("", "selene-run")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temp mutation dir: %w", err)
+		}
+		config.MutationDir = tmpDir
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+	} else {
+		if err := os.MkdirAll(config.MutationDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create mutation dir: %w", err)
+		}
+	}
+
+	// Load DB coverage for targeted execution if requested and not provided
+	if config.Targeted && config.TestIndex == nil && config.DBPath != "" {
+		db := NewDatabase(config.DBPath)
+		testIndex, err := db.LoadTestCoverage()
+		if err == nil && testIndex != nil {
+			config.TestIndex = testIndex
+		}
 	}
 
 	// 2. Generate Coverage
@@ -190,6 +213,7 @@ func Run(patterns []string, config Config) (*Report, error) {
 		pf       *ParsedFile
 		filename string
 		mut      mutator.Mutation
+		mutator  string
 	}
 
 	tasks := make(chan task, config.Workers*2)
@@ -197,9 +221,23 @@ func Run(patterns []string, config Config) (*Report, error) {
 
 	// Collector (Reducer)
 	finalReport := make(chan *Report)
+	var allMutationResults []mutationResult
+	var mutResultsMu sync.Mutex
+
 	go func() {
-		report := &Report{TestKills: make(map[string][]string)}
+		report := &Report{
+			TestKills:     make(map[string][]string),
+			ExecutedTests: make(map[string]bool),
+		}
 		for res := range results {
+			mutResultsMu.Lock()
+			allMutationResults = append(allMutationResults, res)
+			mutResultsMu.Unlock()
+
+			for _, t := range res.executed {
+				report.ExecutedTests[t] = true
+			}
+
 			report.Total++
 			displayStatus := res.status
 			switch res.status {
@@ -230,6 +268,8 @@ func Run(patterns []string, config Config) (*Report, error) {
 		finalReport <- report
 	}()
 
+	var astMu sync.Mutex
+
 	// Workers
 	var wg sync.WaitGroup
 	for i := 0; i < config.Workers; i++ {
@@ -246,21 +286,27 @@ func Run(patterns []string, config Config) (*Report, error) {
 			overlayPath := filepath.Join(workerDir, "overlay.json")
 
 			for t := range tasks {
-				t.mut.Apply()
-				pos := t.pf.Fset.Position(t.mut.Pos)
 				mutatedFile := filepath.Join(workerDir, filepath.Base(t.filename))
+				var pos token.Position
+				var writeErr error
+
+				astMu.Lock()
+				t.mut.Apply()
+				pos = t.pf.Fset.Position(t.mut.Pos)
+				writeErr = writeAST(mutatedFile, t.pf.Fset, t.pf.File)
+				t.mut.Revert()
+				astMu.Unlock()
+
+				if writeErr != nil {
+					if config.Verbose {
+						log.Printf("failed to write mutated file: %s", writeErr)
+					}
+					continue
+				}
 
 				status := "survived"
 				bFailures := 0
 				var killedBy []string
-
-				if err := writeAST(mutatedFile, t.pf.Fset, t.pf.File); err != nil {
-					if config.Verbose {
-						log.Printf("failed to write mutated file: %s", err)
-					}
-					t.mut.Revert()
-					continue
-				}
 
 				absOrig, _ := filepath.Abs(t.filename)
 				overlays := map[string]string{absOrig: mutatedFile}
@@ -268,15 +314,25 @@ func Run(patterns []string, config Config) (*Report, error) {
 					if config.Verbose {
 						log.Printf("failed to create overlay: %s", err)
 					}
-					t.mut.Revert()
 					continue
 				}
 
 				pkgDir := filepath.Dir(absOrig)
+
+				// Targeted test filtering
+				runFilter := ""
+				if config.Targeted && config.TestIndex != nil {
+					coveringTests := config.TestIndex.GetCoveringTests(t.filename, pos.Line)
+					if len(coveringTests) > 0 {
+						runFilter = BuildRunFilter(coveringTests)
+					}
+				}
+
 				ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
-				events, err := runGoTest(ctx, pkgDir, overlayPath)
+				events, err := runGoTest(ctx, pkgDir, overlayPath, runFilter)
 				cancel()
 
+				var executed []string
 				if err != nil {
 					if ctx.Err() == context.DeadlineExceeded {
 						status = "killed (timeout)"
@@ -287,6 +343,9 @@ func Run(patterns []string, config Config) (*Report, error) {
 				} else {
 					killed := false
 					for _, e := range events {
+						if e.Test != "" {
+							executed = append(executed, e.Test)
+						}
 						if e.Action == "fail" && e.Test != "" {
 							killed = true
 							killedBy = append(killedBy, e.Test)
@@ -300,13 +359,14 @@ func Run(patterns []string, config Config) (*Report, error) {
 				results <- mutationResult{
 					status:        status,
 					mutID:         t.mut.ID,
+					mutator:       t.mutator,
 					filename:      t.filename,
 					line:          pos.Line,
 					col:           pos.Column,
 					buildFailures: bFailures,
 					killedBy:      killedBy,
+					executed:      executed,
 				}
-				t.mut.Revert()
 			}
 		}(i)
 	}
@@ -334,13 +394,14 @@ func Run(patterns []string, config Config) (*Report, error) {
 						results <- mutationResult{
 							status:   "uncovered",
 							mutID:    mut.ID,
+							mutator:  m.Name(),
 							filename: filename,
 							line:     pos.Line,
 							col:      pos.Column,
 						}
 						continue
 					}
-					tasks <- task{pf: pf, filename: filename, mut: mut}
+					tasks <- task{pf: pf, filename: filename, mut: mut, mutator: m.Name()}
 				}
 			}
 			return true
@@ -350,7 +411,70 @@ func Run(patterns []string, config Config) (*Report, error) {
 	close(tasks)
 	wg.Wait()
 	close(results)
-	return <-finalReport, nil
+	rep := <-finalReport
+
+	// Save to SQLite database if requested
+	if config.DBPath != "" {
+		db := NewDatabase(config.DBPath)
+		var mutRecords []MutationRecord
+		for _, r := range allMutationResults {
+			dbStatus := r.status
+			if dbStatus == "killed (timeout)" {
+				dbStatus = "timeout"
+			}
+			mutRecords = append(mutRecords, MutationRecord{
+				ID:       r.mutID,
+				Mutator:  r.mutator,
+				File:     r.filename,
+				Line:     r.line,
+				Col:      r.col,
+				Status:   dbStatus,
+				KilledBy: r.killedBy,
+			})
+		}
+
+		// Collect discovered tests from targets and executed tests
+		var discoveredTests []string
+		for _, target := range targets {
+			tests, err := DiscoverTests(target.Dir)
+			if err == nil {
+				discoveredTests = append(discoveredTests, tests...)
+			}
+		}
+		for t := range rep.ExecutedTests {
+			discoveredTests = append(discoveredTests, t)
+		}
+
+		stats := CalculateTestStats(discoveredTests, rep.TestKills)
+		var testRecords []TestRecord
+		pkgName := ""
+		if len(targets) > 0 {
+			pkgName = targets[0].ImportPath
+		}
+		for _, gt := range stats.GoodTests {
+			testRecords = append(testRecords, TestRecord{
+				TestName:        gt,
+				Package:         pkgName,
+				Status:          "good",
+				MutationsKilled: len(stats.AggregatedKills[gt]),
+				KilledMutantIDs: stats.AggregatedKills[gt],
+			})
+		}
+		for _, bt := range stats.BadTests {
+			testRecords = append(testRecords, TestRecord{
+				TestName:        bt,
+				Package:         pkgName,
+				Status:          "bad",
+				MutationsKilled: 0,
+			})
+		}
+
+		if err := db.SaveResults(mutRecords, testRecords); err != nil && config.Verbose {
+			log.Printf("failed to save results to database %s: %v", config.DBPath, err)
+		}
+	}
+
+	return rep, nil
 }
 
 func parseFile(filename string) (*ParsedFile, error) {
@@ -394,8 +518,14 @@ func createOverlayFile(overlayPath string, overlays map[string]string) (err erro
 	return err
 }
 
-func runGoTest(ctx context.Context, pkgDir, overlay string) ([]TestEvent, error) {
-	cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "--json", "--overlay", overlay, ".")
+func runGoTest(ctx context.Context, pkgDir, overlay, runFilter string) ([]TestEvent, error) {
+	args := []string{"test", "-count=1", "--json", "--overlay", overlay}
+	if runFilter != "" {
+		args = append(args, "-run", runFilter)
+	}
+	args = append(args, ".")
+
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = pkgDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
