@@ -405,14 +405,18 @@ func TestSlowMultiply(t *testing.T) {
 
 	mutators := []mutator.Mutator{&mutator.ArithmeticMutator{}}
 
-	// 1. Untargeted run: runs both tests (including 100ms sleep) for every mutation
+	// 1. Untargeted baseline: both tests (including 100ms sleep) run for all mutations
+	idxAll := NewMemoryTestIndex()
+	idxAll.AddCoverage(srcPath, 1, 10, "TestFastAdd")
+	idxAll.AddCoverage(srcPath, 1, 10, "TestSlowMultiply")
+
 	mutDirUntargeted := filepath.Join(dir, "mut-untargeted")
 	configUntargeted := Config{
 		MutationDir: mutDirUntargeted,
 		Mutators:    mutators,
 		Workers:     1,
 		Timeout:     5 * time.Second,
-		Targeted:    false,
+		TestIndex:   idxAll,
 	}
 
 	startUntargeted := time.Now()
@@ -430,7 +434,6 @@ func TestSlowMultiply(t *testing.T) {
 		Mutators:    mutators,
 		Workers:     1,
 		Timeout:     5 * time.Second,
-		Targeted:    true,
 		TestIndex:   idx,
 	}
 
@@ -526,7 +529,6 @@ func TestTable(t *testing.T) {
 		Mutators:    mutators,
 		Workers:     1,
 		Timeout:     5 * time.Second,
-		Targeted:    true,
 		TestIndex:   idxParent,
 	}
 
@@ -545,7 +547,6 @@ func TestTable(t *testing.T) {
 		Mutators:    mutators,
 		Workers:     1,
 		Timeout:     5 * time.Second,
-		Targeted:    true,
 		TestIndex:   idxSub,
 	}
 

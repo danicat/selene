@@ -32,7 +32,7 @@ Options:
 
 Examples:
   ./install.sh                      # Install prebuilt binary for current OS/Arch
-  ./install.sh -v v0.2.0            # Install specific version
+  ./install.sh -v v0.3.0            # Install specific version
   ./install.sh --build              # Build from source via 'go install'
 EOF
 }
@@ -143,7 +143,7 @@ else
     exit 1
   fi
   echo -e "🔨 ${BLUE}[Source] Building and installing via 'go install'...${NC}"
-  go install "github.com/${REPO}/cmd/selene@${VERSION}"
+  go install "github.com/${REPO}@${VERSION}"
   if [ -f "${BIN_PATH}" ]; then
     echo -e "${GREEN}✓ Installed via go install to ${BIN_PATH}${NC}"
   else

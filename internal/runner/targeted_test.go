@@ -1,13 +1,11 @@
 package runner
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
 
 func TestBuildRunFilter(t *testing.T) {
@@ -163,155 +161,44 @@ func TestMemoryTestIndex_Concurrent(t *testing.T) {
 	}
 }
 
-func TestDatabase_LoadTestCoverage_StartEndLineSchema(t *testing.T) {
+func TestBuildCoverageIndex(t *testing.T) {
+	ctx := context.Background()
+	absTestdata, err := filepath.Abs("../../testdata")
+	if err != nil {
+		t.Fatalf("failed to resolve testdata path: %v", err)
+	}
+
+	targets := []PackageTarget{
+		{
+			Dir:        absTestdata,
+			ImportPath: "github.com/danicat/selene/testdata",
+			GoFiles:    []string{filepath.Join(absTestdata, "cond.go")},
+		},
+	}
+
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "testquery.db")
-
-	dbConn, err := sql.Open("sqlite", dbPath)
+	index, err := BuildCoverageIndex(ctx, targets, 2, tmpDir, false)
 	if err != nil {
-		t.Fatalf("failed to open sqlite DB: %v", err)
+		t.Fatalf("BuildCoverageIndex failed: %v", err)
 	}
 
-	// Create test_coverage table with (file, start_line, end_line, test_name, count)
-	createTableSQL := `
-	CREATE TABLE test_coverage (
-		file TEXT NOT NULL,
-		start_line INTEGER NOT NULL,
-		end_line INTEGER NOT NULL,
-		test_name TEXT NOT NULL,
-		count INTEGER NOT NULL
-	);
-	`
-	if _, err := dbConn.Exec(createTableSQL); err != nil {
-		t.Fatalf("failed to create test_coverage table: %v", err)
+	condFile := filepath.Join(absTestdata, "cond.go")
+	if !index.IsCovered(condFile, 6) {
+		t.Errorf("expected line 6 in cond.go to be covered")
 	}
 
-	// Insert test data
-	insertSQL := `
-	INSERT INTO test_coverage (file, start_line, end_line, test_name, count) VALUES
-	('calc.go', 10, 20, 'TestCompute', 5),
-	('calc.go', 15, 25, 'TestCompute/Sub', 3),
-	('calc.go', 30, 40, 'TestMax', 1),
-	('math.go', 5, 15, 'TestAdd[1]', 2);
-	`
-	if _, err := dbConn.Exec(insertSQL); err != nil {
-		t.Fatalf("failed to insert coverage rows: %v", err)
-	}
-	dbConn.Close()
-
-	db := NewDatabase(dbPath)
-	index, err := db.LoadTestCoverage()
-	if err != nil {
-		t.Fatalf("LoadTestCoverage failed: %v", err)
+	covTests := index.GetCoveringTests(condFile, 6)
+	if len(covTests) == 0 {
+		t.Errorf("expected covering tests for cond.go:6, got none")
 	}
 
-	// Check calc.go line 12 -> TestCompute
-	cov12 := index.GetCoveringTests("calc.go", 12)
-	if len(cov12) != 1 || cov12[0] != "TestCompute" {
-		t.Errorf("expected [TestCompute] for calc.go:12, got %v", cov12)
+	// Line 7 is executed by TestFake (cond(100))
+	if !index.IsCovered(condFile, 7) {
+		t.Errorf("expected line 7 in cond.go to be covered")
 	}
 
-	// Check calc.go line 18 -> TestCompute and TestCompute/Sub (exact subtests preserved)
-	cov18 := index.GetCoveringTests("calc.go", 18)
-	if len(cov18) != 2 || cov18[0] != "TestCompute" || cov18[1] != "TestCompute/Sub" {
-		t.Errorf("expected [TestCompute, TestCompute/Sub] for calc.go:18, got %v", cov18)
-	}
-
-	// Check calc.go line 35 -> TestMax
-	cov35 := index.GetCoveringTests("calc.go", 35)
-	if len(cov35) != 1 || cov35[0] != "TestMax" {
-		t.Errorf("expected [TestMax] for calc.go:35, got %v", cov35)
-	}
-
-	// Check math.go line 10 -> TestAdd[1]
-	covMath := index.GetCoveringTests("math.go", 10)
-	if len(covMath) != 1 || covMath[0] != "TestAdd[1]" {
-		t.Errorf("expected [TestAdd[1]] for math.go:10, got %v", covMath)
-	}
-
-	// Check BuildRunFilter with loaded tests
-	filter := BuildRunFilter(covMath)
-	expectedFilter := `^TestAdd\[1\]$`
-	if filter != expectedFilter {
-		t.Errorf("BuildRunFilter(%v) = %q, want %q", covMath, filter, expectedFilter)
-	}
-}
-
-func TestDatabase_LoadTestCoverage_SingleLineSchema(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "testquery_single.db")
-
-	dbConn, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("failed to open sqlite DB: %v", err)
-	}
-
-	// Create test_coverage table with (file, line, test_name, count)
-	createTableSQL := `
-	CREATE TABLE test_coverage (
-		file TEXT NOT NULL,
-		line INTEGER NOT NULL,
-		test_name TEXT NOT NULL,
-		count INTEGER NOT NULL
-	);
-	`
-	if _, err := dbConn.Exec(createTableSQL); err != nil {
-		t.Fatalf("failed to create single-line test_coverage table: %v", err)
-	}
-
-	insertSQL := `
-	INSERT INTO test_coverage (file, line, test_name, count) VALUES
-	('calc.go', 10, 'TestCompute', 1),
-	('calc.go', 11, 'TestCompute', 1),
-	('calc.go', 20, 'TestMax', 1);
-	`
-	if _, err := dbConn.Exec(insertSQL); err != nil {
-		t.Fatalf("failed to insert single-line coverage rows: %v", err)
-	}
-	dbConn.Close()
-
-	index, err := LoadTestIndex(dbPath)
-	if err != nil {
-		t.Fatalf("LoadTestIndex failed: %v", err)
-	}
-
-	cov10 := index.GetCoveringTests("calc.go", 10)
-	if len(cov10) != 1 || cov10[0] != "TestCompute" {
-		t.Errorf("expected [TestCompute] for calc.go:10, got %v", cov10)
-	}
-
-	cov15 := index.GetCoveringTests("calc.go", 15)
-	if len(cov15) != 0 {
-		t.Errorf("expected [] for calc.go:15, got %v", cov15)
-	}
-
-	cov20 := index.GetCoveringTests("calc.go", 20)
-	if len(cov20) != 1 || cov20[0] != "TestMax" {
-		t.Errorf("expected [TestMax] for calc.go:20, got %v", cov20)
-	}
-}
-
-func TestDatabase_LoadTestCoverage_MissingTable(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "empty.db")
-
-	// InitDB creates selene tables but not test_coverage
-	db, err := InitDB(dbPath)
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	db.Close()
-
-	index, err := LoadTestIndex(dbPath)
-	if err != nil {
-		t.Fatalf("LoadTestIndex failed on missing table: %v", err)
-	}
-	if index == nil {
-		t.Fatalf("expected non-nil TestIndex for missing table")
-	}
-
-	cov := index.GetCoveringTests("anything.go", 1)
-	if len(cov) != 0 {
-		t.Errorf("expected empty coverage from empty index, got %v", cov)
+	// Line 1 (package header) has no executable statements
+	if index.IsCovered(condFile, 1) {
+		t.Errorf("expected line 1 not to be covered")
 	}
 }

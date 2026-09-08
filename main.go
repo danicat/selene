@@ -32,8 +32,7 @@ func main() {
 	var timeout time.Duration
 	var jsonOut bool
 	var dbPath string
-	var targeted bool
-	var adaptiveTimeout bool
+	var timebox time.Duration
 
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.BoolVar(&verbose, "v", false, "Enable verbose output")
@@ -44,8 +43,7 @@ func main() {
 	flag.DurationVar(&timeout, "timeout", 10*time.Second, "Maximum time allowed for a single test run")
 	flag.BoolVar(&jsonOut, "json", false, "Output results in JSON format")
 	flag.StringVar(&dbPath, "db", "", "Path to SQLite database to store mutation outcomes and test metrics")
-	flag.BoolVar(&targeted, "targeted", false, "Enable targeted test execution using coverage index")
-	flag.BoolVar(&adaptiveTimeout, "adaptive-timeout", false, "Enable adaptive dynamic timeouts based on baseline test durations")
+	flag.DurationVar(&timebox, "timebox", 0, "Total duration time for mutation testing to run (e.g. 5m, 30s)")
 	flag.Parse()
 
 	if showVersion {
@@ -60,6 +58,11 @@ func main() {
 	if flag.NArg() < 1 {
 		usage()
 		os.Exit(1)
+	}
+
+	if timebox < 0 {
+		fmt.Fprintf(os.Stderr, "invalid value for flag -timebox: duration must be positive\n")
+		os.Exit(2)
 	}
 
 	// Setup mutation directory
@@ -83,22 +86,16 @@ func main() {
 
 	patterns := flag.Args()
 
-	isTargeted := targeted
-	if dbPath != "" {
-		isTargeted = true
-	}
-
 	config := runner.Config{
-		Verbose:         verbose,
-		MutationDir:     mutationDir,
-		Mutators:        runner.DefaultMutators(),
-		Workers:         workers,
-		Seed:            seed,
-		Shuffle:         shuffle,
-		Timeout:         timeout,
-		DBPath:          dbPath,
-		Targeted:        isTargeted,
-		AdaptiveTimeout: adaptiveTimeout,
+		Verbose:     verbose,
+		MutationDir: mutationDir,
+		Mutators:    runner.DefaultMutators(),
+		Workers:     workers,
+		Seed:        seed,
+		Shuffle:     shuffle,
+		Timeout:     timeout,
+		DBPath:      dbPath,
+		Timebox:     timebox,
 	}
 
 	report, err := runner.Run(patterns, config)
@@ -108,12 +105,14 @@ func main() {
 
 	// Discover tests from resolved target packages and executed test events
 	var discoveredTests []string
-	targets, _, err := runner.ResolveTargets(patterns)
-	if err == nil {
-		for _, target := range targets {
-			tests, err := runner.DiscoverTests(target.Dir)
-			if err == nil {
-				discoveredTests = append(discoveredTests, tests...)
+	if !report.TimeboxExpired {
+		targets, _, err := runner.ResolveTargets(patterns)
+		if err == nil {
+			for _, target := range targets {
+				tests, err := runner.DiscoverTests(target.Dir)
+				if err == nil {
+					discoveredTests = append(discoveredTests, tests...)
+				}
 			}
 		}
 	}

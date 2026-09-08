@@ -358,10 +358,9 @@ func TestSlowMultiply(t *testing.T) {
 	config := Config{
 		MutationDir: mutDir,
 		Mutators:    []mutator.Mutator{&mutator.ArithmeticMutator{}},
-		Workers:     2,
-		Timeout:     5 * time.Second,
-		Targeted:    true,
-		TestIndex:   idx,
+		Workers:   2,
+		Timeout:   5 * time.Second,
+		TestIndex: idx,
 	}
 
 	report, err := Run([]string{srcPath}, config)

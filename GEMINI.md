@@ -6,22 +6,19 @@ This document provides architectural guidance, workflow instructions, and databa
 
 ## 🔄 TestQuery (`tq`) & Selene Synergy
 
-TestQuery (`tq`) and Selene work hand-in-hand to provide ultra-fast, database-driven mutation testing:
+TestQuery (`tq`) and Selene integrate seamlessly for reporting and persisting mutation testing outcomes:
 
 ```
 +------------------+         +--------------------+         +--------------------+
-|  Go Test Suite   |  tq     |   testquery.db     |  selene |  Targeted Mutants  |
-|  go test ./...   | ------> |  (test_coverage)   | ------> |  -run '^(TestA)$'  |
-+------------------+ build   +--------------------+  --db   +--------------------+
-                                      ^                               |
-                                      | Writes Results                |
-                                      +-------------------------------+
-                                        (selene, selene_tests, views)
+|  Target Mutants  | selene  |   testquery.db     |   tq    | Diagnostic Queries |
+|  -run '^(TestA)$'| ------> |  (selene, selene_  | ------> | tq query "SELECT * |
+| (native coverage)|  --db   |   tests, views)    |  query  | FROM selene_... "  |
++------------------+         +--------------------+         +--------------------+
 ```
 
-1. **Coverage Profiling**: `tq build ./...` analyzes the codebase and populates `testquery.db` with detailed, statement-level test execution coverage (`test_coverage` table).
-2. **Targeted Mutation Testing**: Selene reads `testquery.db` via `--db testquery.db` and indexes which tests cover each line in memory (`TestIndex`). When evaluating a mutant on a specific line, Selene executes **only the tests that cover that line** using `-run '^(TestA|TestB)$'`.
-3. **Results Persistence**: Selene writes all mutant outcomes and test effectiveness rankings directly back into SQLite, creating tables (`selene`, `selene_tests`) and diagnostic views (`selene_survived`, `selene_zero_kill_tests`, `selene_summary`).
+1. **Native Coverage Profiling**: Selene natively profiles statement-level test coverage using the Go toolchain, indexing which tests cover each line in memory (`TestIndex`). When evaluating a mutant, Selene executes **only the tests that cover that line** using `-run '^(TestA|TestB)$'`. Mutants on uncovered lines are classified as `uncovered` without running tests.
+2. **Results Persistence**: When `--db` is passed, Selene writes all mutant outcomes and test effectiveness rankings directly into SQLite, creating tables (`selene`, `selene_tests`) and diagnostic views (`selene_survived`, `selene_zero_kill_tests`, `selene_summary`).
+3. **Diagnosis with TestQuery**: Developers use `tq query` or SQLite directly to inspect surviving mutants and unproven tests.
 
 ---
 
@@ -118,10 +115,12 @@ WHERE s.status = 'survived';
 
 ## 🏗️ Architecture & Internal Mechanisms
 
-### In-Memory Test Indexing (`TestIndex`)
-When `--db` is passed, [`internal/runner`](file:///Users/petruzalek/projects/selene/internal/runner) loads all `(file, start_line, end_line, test_name)` tuples into a thread-safe in-memory interval index:
-* **Lookup Complexity**: $O(\log N)$ or fast hash table lookups per AST node.
-* **Target Filter Builder**: Generates `-run '^(TestFoo|TestBar)$'` flags for `go test`. If no covering tests are recorded (e.g. uncovered line), test execution is skipped entirely.
+### Native In-Memory Test Indexing (`TestIndex`)
+Selene profiles test coverage natively via `BuildCoverageIndex` using the Go toolchain before evaluating mutations:
+* Precompiles the package test binary once with coverage instrumentation.
+* Runs tests with `-test.coverprofile` to index all `(file, start_line, end_line, test_name)` tuples into a thread-safe in-memory interval index (`MemoryTestIndex`).
+* **Target Filter Builder**: Generates `-run '^(TestFoo|TestBar)$'` flags for `go test` so only covering tests execute for each mutant.
+* **Uncovered Mutants**: If no covering tests touch a mutated line, the mutant is marked `uncovered` immediately without running any tests.
 
 ### Overlay Compilation
 Selene uses Go's native compilation overlay feature:

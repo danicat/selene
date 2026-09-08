@@ -186,6 +186,10 @@ type JSONReport struct {
 	Uncovered         int                 `json:"uncovered"`
 	Excluded          int                 `json:"excluded"`
 	BuildFailures     int                 `json:"build_failures,omitempty"`
+	Timebox           string              `json:"timebox,omitempty"`
+	TimeboxExpired    bool                `json:"timebox_expired,omitempty"`
+	RemainingTasks    int                 `json:"remaining_mutations,omitempty"`
+	TotalDiscovered   int                 `json:"total_discovered,omitempty"`
 	TotalTests        int                 `json:"total_tests"`
 	GoodTests         []string            `json:"good_tests"`
 	ZeroKillTests     []string            `json:"zero_kill_tests"`
@@ -200,6 +204,9 @@ func NewJSONReport(report *Report, stats TestStats, verbose bool) JSONReport {
 	var totalMut, killed, survived, timeouts, uncovered, excluded, buildFailures int
 	var mutScore float64
 	var excludedList []ExcludedMutant
+	var timeboxStr string
+	var timeboxExpired bool
+	var remainingTasks, totalDiscovered int
 	if report != nil {
 		totalMut = report.Total
 		killed = report.Killed
@@ -210,6 +217,12 @@ func NewJSONReport(report *Report, stats TestStats, verbose bool) JSONReport {
 		buildFailures = report.BuildFailures
 		mutScore = report.Score()
 		excludedList = report.ExcludedList
+		if report.TimeboxExpired {
+			timeboxStr = report.TimeboxDuration.String()
+			timeboxExpired = true
+			remainingTasks = report.RemainingTasks
+			totalDiscovered = report.TotalDiscovered
+		}
 	}
 
 	goodTests := stats.GoodTests
@@ -229,6 +242,10 @@ func NewJSONReport(report *Report, stats TestStats, verbose bool) JSONReport {
 		Uncovered:         uncovered,
 		Excluded:          excluded,
 		BuildFailures:     buildFailures,
+		Timebox:           timeboxStr,
+		TimeboxExpired:    timeboxExpired,
+		RemainingTasks:    remainingTasks,
+		TotalDiscovered:   totalDiscovered,
 		TotalTests:        stats.TotalTests,
 		GoodTests:         goodTests,
 		ZeroKillTests:     zeroKillTests,
@@ -267,6 +284,11 @@ func PrintHumanReport(w io.Writer, report *Report, stats TestStats, verbose bool
 		excluded = report.Excluded
 		buildFailures = report.BuildFailures
 		mutScore = report.Score()
+	}
+
+	if report != nil && report.TimeboxExpired {
+		fmt.Fprintf(w, "\n⏰ Timebox reached (%v). Evaluated %d mutations (%d remaining out of %d total in codebase).\n",
+			report.TimeboxDuration, totalMut, report.RemainingTasks, report.TotalDiscovered)
 	}
 
 	fmt.Fprintf(w, "\nTotal mutations: %d\n", totalMut)

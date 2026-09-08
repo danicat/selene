@@ -277,10 +277,6 @@ func (d *Database) WriteResults(mutations []MutationRecord, tests []TestRecord) 
 	return d.SaveResults(mutations, tests)
 }
 
-// LoadTestCoverage loads statement-level coverage from the test_coverage table.
-func (d *Database) LoadTestCoverage() (TestIndex, error) {
-	return LoadTestIndex(d.path)
-}
 
 // SaveResults persists mutation outcomes and test records to the database.
 func (d *Database) SaveResults(mutations []MutationRecord, tests []TestRecord) error {

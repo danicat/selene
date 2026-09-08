@@ -47,22 +47,25 @@ type Config struct {
 	Shuffle         bool
 	Timeout         time.Duration
 	DBPath          string
-	Targeted        bool
 	TestIndex       TestIndex
-	AdaptiveTimeout bool
+	Timebox         time.Duration
 }
 
 type Report struct {
-	Total         int
-	Killed        int
-	Timeouts      int
-	Survived      int
-	Uncovered     int
-	Excluded      int
-	BuildFailures int
-	TestKills     map[string][]string // test name -> list of mutation IDs
-	ExecutedTests map[string]bool     // all executed test/subtest names
-	ExcludedList  []ExcludedMutant    // analytics on excluded mutations
+	Total           int
+	Killed          int
+	Timeouts        int
+	Survived        int
+	Uncovered       int
+	Excluded        int
+	BuildFailures   int
+	TimeboxDuration time.Duration       // configured timebox (0 if none)
+	TimeboxExpired  bool                // true if run was terminated by timebox
+	RemainingTasks  int                 // number of mutation tasks that were not executed due to timebox
+	TotalDiscovered int                 // total candidate mutations found across the codebase
+	TestKills       map[string][]string // test name -> list of mutation IDs
+	ExecutedTests   map[string]bool     // all executed test/subtest names
+	ExcludedList    []ExcludedMutant    // analytics on excluded mutations
 }
 
 func (r Report) Score() float64 {
@@ -149,6 +152,9 @@ func Run(patterns []string, config Config) (*Report, error) {
 		if config.Shuffle {
 			fmt.Println("Shuffle: enabled")
 		}
+		if config.Timebox > 0 {
+			fmt.Printf("Timebox: %v\n", config.Timebox)
+		}
 	}
 
 	// 1. Path Resolution via ResolveTargets
@@ -181,34 +187,28 @@ func Run(patterns []string, config Config) (*Report, error) {
 		}
 	}
 
-	// Load DB coverage for targeted execution if requested and not provided
-	if config.Targeted && config.TestIndex == nil && config.DBPath != "" {
-		db := NewDatabase(config.DBPath)
-		testIndex, err := db.LoadTestCoverage()
-		if err == nil && testIndex != nil {
-			config.TestIndex = testIndex
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if config.Timebox > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), config.Timebox)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+
+	// 2. Generate Per-Test Coverage Index
+	if config.TestIndex == nil {
+		if config.Verbose {
+			log.Println("profiling test coverage...")
 		}
-	}
-
-	// 2. Generate Coverage
-	if config.Verbose {
-		log.Println("generating coverage profile...")
-	}
-
-	coverFile := filepath.Join(config.MutationDir, "coverage.out")
-	firstAbs, _ := filepath.Abs(filenames[0])
-	moduleRoot := findModuleRoot(filepath.Dir(firstAbs))
-	coverCmd := exec.Command("go", "test", "-coverprofile="+coverFile, "./...")
-	coverCmd.Dir = moduleRoot
-
-	if out, err := coverCmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("coverage generation failed: %s\n%s", err, out)
-	}
-	defer func() { _ = os.Remove(coverFile) }()
-
-	coverage, err := LoadCoverage(coverFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load coverage: %w", err)
+		testIndex, err := BuildCoverageIndex(ctx, targets, config.Workers, config.MutationDir, config.Verbose)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("timebox (%v) expired during baseline test coverage profiling", config.Timebox)
+			}
+			return nil, fmt.Errorf("coverage profiling failed: %w", err)
+		}
+		config.TestIndex = testIndex
 	}
 
 	// 3. Mutation Pipeline
@@ -217,6 +217,75 @@ func Run(patterns []string, config Config) (*Report, error) {
 		filename string
 		mut      mutator.Mutation
 		mutator  string
+	}
+
+	var taskList []task
+	var earlyResults []mutationResult
+	totalDiscovered := 0
+
+	// Generator (Producer)
+	for _, filename := range filenames {
+		if config.Verbose {
+			log.Printf("processing file: %s", filename)
+		}
+		pf, err := parseFile(filename)
+
+		if err != nil {
+			if config.Verbose {
+				log.Printf("failed to parse file %s: %v", filename, err)
+			}
+			continue
+		}
+
+		exclusions := mutator.BuildDestructiveExclusionSet(pf.File, pf.Fset)
+
+		ast.Inspect(pf.File, func(n ast.Node) bool {
+			if n == nil {
+				return true
+			}
+			for _, m := range config.Mutators {
+				muts := m.Check(n)
+				for _, mut := range muts {
+					totalDiscovered++
+					pos := pf.Fset.Position(mut.Pos)
+
+					// Check if this AST node is excluded for safety
+					if reason, isExcluded := exclusions[n]; isExcluded {
+						earlyResults = append(earlyResults, mutationResult{
+							status:   "excluded",
+							mutID:    mut.ID,
+							mutator:  m.Name(),
+							filename: filename,
+							line:     pos.Line,
+							col:      pos.Column,
+							reason:   reason,
+							killedBy: []string{reason},
+						})
+						continue
+					}
+
+					if !config.TestIndex.IsCovered(filename, pos.Line) {
+						earlyResults = append(earlyResults, mutationResult{
+							status:   "uncovered",
+							mutID:    mut.ID,
+							mutator:  m.Name(),
+							filename: filename,
+							line:     pos.Line,
+							col:      pos.Column,
+						})
+						continue
+					}
+					taskList = append(taskList, task{pf: pf, filename: filename, mut: mut, mutator: m.Name()})
+				}
+			}
+			return true
+		})
+	}
+
+	if config.Shuffle {
+		r.Shuffle(len(taskList), func(i, j int) {
+			taskList[i], taskList[j] = taskList[j], taskList[i]
+		})
 	}
 
 	tasks := make(chan task, config.Workers*2)
@@ -300,6 +369,10 @@ func Run(patterns []string, config Config) (*Report, error) {
 			overlayPath := filepath.Join(workerDir, "overlay.json")
 
 			for t := range tasks {
+				if ctx.Err() != nil {
+					break
+				}
+
 				mutatedFile := filepath.Join(workerDir, filepath.Base(t.filename))
 				var pos token.Position
 				var writeErr error
@@ -333,9 +406,9 @@ func Run(patterns []string, config Config) (*Report, error) {
 
 				pkgDir := filepath.Dir(absOrig)
 
-				// Targeted test filtering
+				// Targeted test filtering: run only tests that cover this mutated line
 				runFilter := ""
-				if config.Targeted && config.TestIndex != nil {
+				if config.TestIndex != nil {
 					coveringTests := config.TestIndex.GetCoveringTests(t.filename, pos.Line)
 					if len(coveringTests) > 0 {
 						runFilter = BuildRunFilter(coveringTests)
@@ -343,18 +416,19 @@ func Run(patterns []string, config Config) (*Report, error) {
 				}
 
 				testTimeout := config.Timeout
-				if config.AdaptiveTimeout && config.TestIndex != nil {
-					expectedDuration := config.TestIndex.GetExpectedDuration(t.filename, pos.Line)
-					testTimeout = CalculateAdaptiveTimeout(expectedDuration, config.Timeout)
-				}
 
-				ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-				events, err := runGoTest(ctx, pkgDir, overlayPath, runFilter)
-				cancel()
+				testCtx, testCancel := context.WithTimeout(ctx, testTimeout)
+				events, err := runGoTest(testCtx, pkgDir, overlayPath, runFilter)
+				testCancel()
+
+				if ctx.Err() != nil {
+					// Timebox expired during execution; do not record partial result
+					break
+				}
 
 				var executed []string
 				if err != nil {
-					if ctx.Err() == context.DeadlineExceeded {
+					if testCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 						status = "killed (timeout)"
 					} else {
 						status = "killed"
@@ -391,68 +465,37 @@ func Run(patterns []string, config Config) (*Report, error) {
 		}(i)
 	}
 
-	// Generator (Producer)
-	for _, filename := range filenames {
-		if config.Verbose {
-			log.Printf("processing file: %s", filename)
+	// Stream tasks to workers
+	go func() {
+		defer close(tasks)
+		for _, t := range taskList {
+			select {
+			case <-ctx.Done():
+				return
+			case tasks <- t:
+			}
 		}
-		pf, err := parseFile(filename)
+	}()
 
-		if err != nil {
-			if config.Verbose {
-				log.Printf("failed to parse file %s: %v", filename, err)
-			}
-			continue
-		}
-
-		exclusions := mutator.BuildDestructiveExclusionSet(pf.File, pf.Fset)
-
-		ast.Inspect(pf.File, func(n ast.Node) bool {
-			if n == nil {
-				return true
-			}
-			for _, m := range config.Mutators {
-				muts := m.Check(n)
-				for _, mut := range muts {
-					pos := pf.Fset.Position(mut.Pos)
-
-					// Check if this AST node is excluded for safety
-					if reason, isExcluded := exclusions[n]; isExcluded {
-						results <- mutationResult{
-							status:   "excluded",
-							mutID:    mut.ID,
-							mutator:  m.Name(),
-							filename: filename,
-							line:     pos.Line,
-							col:      pos.Column,
-							reason:   reason,
-							killedBy: []string{reason},
-						}
-						continue
-					}
-
-					if !coverage.IsCovered(filename, pos.Line) {
-						results <- mutationResult{
-							status:   "uncovered",
-							mutID:    mut.ID,
-							mutator:  m.Name(),
-							filename: filename,
-							line:     pos.Line,
-							col:      pos.Column,
-						}
-						continue
-					}
-					tasks <- task{pf: pf, filename: filename, mut: mut, mutator: m.Name()}
-				}
-			}
-			return true
-		})
-	}
-
-	close(tasks)
 	wg.Wait()
+
+	expired := ctx.Err() != nil
+	if !expired {
+		for _, er := range earlyResults {
+			results <- er
+		}
+	}
 	close(results)
 	rep := <-finalReport
+
+	if expired {
+		rep.TimeboxExpired = true
+		rep.TimeboxDuration = config.Timebox
+		rep.TotalDiscovered = totalDiscovered
+		rep.RemainingTasks = totalDiscovered - rep.Total
+	} else {
+		rep.TotalDiscovered = rep.Total
+	}
 
 	// Save to SQLite database if requested
 	if config.DBPath != "" {
@@ -476,10 +519,12 @@ func Run(patterns []string, config Config) (*Report, error) {
 
 		// Collect discovered tests from targets and executed tests
 		var discoveredTests []string
-		for _, target := range targets {
-			tests, err := DiscoverTests(target.Dir)
-			if err == nil {
-				discoveredTests = append(discoveredTests, tests...)
+		if !expired {
+			for _, target := range targets {
+				tests, err := DiscoverTests(target.Dir)
+				if err == nil {
+					discoveredTests = append(discoveredTests, tests...)
+				}
 			}
 		}
 		for t := range rep.ExecutedTests {

@@ -15,7 +15,7 @@ builds:
     goarch:
       - amd64
       - arm64
-    main: ./cmd/selene
+    main: .
     binary: bin/selene
     ldflags:
       - -s -w -X main.version={{.Version}}

@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/danicat/selene/main/install.sh | ba
 
 ### Via `go install`
 ```bash
-go install github.com/danicat/selene/cmd/selene@latest
+go install github.com/danicat/selene@latest
 ```
 
 ### Build from Source
@@ -69,7 +69,8 @@ selene --db testquery.db -workers 8 ./...
 | :--- | :--- | :--- | :--- |
 | `-workers` | `int` | `runtime.NumCPU()` | Number of parallel worker goroutines executing mutations concurrently. |
 | `-timeout` | `duration` | `10s` | Maximum time allowed for a single mutant test run (e.g. `5s`, `500ms`). Mutants exceeding this are classified as `timeout` (killed). |
-| `--db` | `string` | `""` | Path to TestQuery SQLite database (e.g. `testquery.db`). Enables targeted `-run` test filtering and persists results. |
+| `-timebox` | `duration` | `""` | Maximum total duration for the entire mutation testing run (e.g. `5m`, `30s`). Halts when elapsed. |
+| `--db` | `string` | `""` | Path to SQLite database (e.g. `testquery.db`) to persist mutation outcomes, test statistics, and diagnostic views. |
 | `-v` | `bool` | `false` | Enable verbose logging (mutations generated, line positions, killed status, covering tests). |
 | `-json` | `bool` | `false` | Output results in structured JSON format for CI/CD pipelines. |
 | `-output`, `--mutation-dir` | `string` | OS Temp Dir | Directory to store temporary mutated overlay files (can also be set via `GOMUTATION` env). |
@@ -170,15 +171,22 @@ balance -= deposit
 
 ---
 
-## 🗄️ TestQuery SQLite Integration (`--db`)
+## 🎯 Native Statement Coverage & Targeted Execution
 
-When the `--db <path>` flag is supplied (pointing to a TestQuery database `testquery.db`), Selene performs two key optimizations:
+Selene automatically profiles test coverage natively before evaluating mutations:
 
-### 1. Targeted Sub-Second Test Execution
-Instead of executing the entire test suite for each mutant, Selene looks up the covering tests for the exact mutated file and line from `testquery.db`'s `test_coverage` table. It constructs a targeted `-run '^(TestFoo|TestBar)$'` regex, yielding massive speedups (10x-50x on larger codebases).
+1. **Per-Test Coverage Profiling**: Selene compiles the test binary once and profiles individual tests using the Go toolchain to determine statement-level coverage across all target packages.
+2. **Targeted Test Execution**: When evaluating a mutant, Selene executes **only the tests that cover the mutated line** using `-run '^(TestA|TestB)$'`. Tests that do not touch the mutated line are never run.
+3. **Uncovered Mutants**: If a mutant occurs on a line with 0 covering tests, it is immediately recorded as `uncovered` without executing any tests.
 
-### 2. Database Schema & Views
-Selene automatically creates and populates the following tables and views in SQLite:
+---
+
+## 🗄️ TestQuery & SQLite Results Persistence (`--db`)
+
+When the `--db <path>` flag is supplied (e.g. `--db testquery.db`), Selene writes all mutant outcomes, test effectiveness statistics, and diagnostic views to SQLite for reporting and analysis:
+
+### Database Schema & Diagnostic Views
+Selene initializes the following tables and diagnostic views in the SQLite database:
 
 #### Table `selene`
 Stores individual mutation records:
@@ -189,8 +197,8 @@ CREATE TABLE IF NOT EXISTS selene (
     file TEXT NOT NULL,
     line INTEGER NOT NULL,
     col INTEGER NOT NULL,
-    status TEXT NOT NULL,       -- 'killed', 'survived', 'uncovered', 'timeout', 'build_failure'
-    killed_by TEXT              -- JSON array or comma-separated test names
+    status TEXT NOT NULL,       -- 'killed', 'survived', 'uncovered', 'timeout', 'excluded'
+    killed_by TEXT              -- Comma-separated test names or exclusion reason
 );
 ```
 
@@ -200,24 +208,45 @@ Aggregates test effectiveness and catches:
 CREATE TABLE IF NOT EXISTS selene_tests (
     test_name TEXT PRIMARY KEY,
     package TEXT NOT NULL,
-    status TEXT NOT NULL,       -- 'good', 'bad'
+    status TEXT NOT NULL,       -- 'good', 'zero_kills'
     mutations_killed INTEGER NOT NULL,
     killed_mutant_ids TEXT      -- Comma-separated mutation IDs
 );
 ```
 
 #### Diagnostic Views
-* `selene_survived`: Instant view of all surviving mutations requiring test improvements.
+* `selene_survived`: Surviving mutations requiring test improvements.
   ```sql
-  SELECT id, mutator, file, line, col FROM selene WHERE status = 'survived';
+  SELECT id, mutator, file, line, col FROM selene_survived;
   ```
-* `selene_zero_kill_tests`: List of tests that ran but caught 0 mutations in the current run.
+* `selene_zero_kill_tests`: Tests that executed but caught 0 mutations in the current run.
   ```sql
   SELECT test_name, package FROM selene_zero_kill_tests;
   ```
-* `selene_summary`: High-level summary of killed, survived, uncovered, and timeout counts.
+* `selene_excluded`: Mutations pruned for host safety (e.g. destructive calls).
+  ```sql
+  SELECT id, mutator, file, line, col, reason FROM selene_excluded;
+  ```
+* `selene_summary`: High-level aggregated statistics.
   ```sql
   SELECT * FROM selene_summary;
+  ```
+
+---
+
+## ⏱️ Timebox Mode & CI Random Sampling (`--timebox`)
+
+The `--timebox` flag sets an upper bound on total execution duration (e.g. `--timebox 5m` or `--timebox 30s`):
+
+```bash
+selene --timebox 5m --shuffle -workers 8 ./...
+```
+
+* **Fixed CI Budgets**: Enforces a strict time limit on mutation runs so CI pipelines never hang or exceed allotted runner time.
+* **Random Sampling with `--shuffle`**: When combined with `--shuffle`, Selene randomizes the order of all candidate mutations across all packages and files. This evaluates a random sample of mutants distributed across the entire codebase within the time limit.
+* **Graceful Termination**: When the timebox expires, in-flight test processes are stopped cleanly. Results evaluated before expiration are retained and reported, displaying both evaluated and remaining counts:
+  ```text
+  ⏰ Timebox reached (5m0s). Evaluated 84 mutations (416 remaining out of 500 total in codebase).
   ```
 
 ---

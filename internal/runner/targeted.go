@@ -1,25 +1,24 @@
 package runner
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
-// TestIndex provides thread-safe in-memory mapping from (file, line) to covering test names
-// and tracks baseline test execution durations for adaptive timeout calculations.
+// TestIndex provides thread-safe in-memory mapping from (file, line) to covering test names.
 type TestIndex interface {
 	GetCoveringTests(file string, line int) []string
 	AddCoverage(file string, startLine, endLine int, testName string)
-	SetTestDuration(testName string, d time.Duration)
-	GetTestDuration(testName string) time.Duration
-	GetExpectedDuration(file string, line int) time.Duration
+	IsCovered(file string, line int) bool
 }
 
 type coverageRange struct {
@@ -30,16 +29,14 @@ type coverageRange struct {
 
 // MemoryTestIndex is an in-memory thread-safe implementation of TestIndex.
 type MemoryTestIndex struct {
-	mu        sync.RWMutex
-	ranges    map[string][]coverageRange // keyed by normalized file path
-	durations map[string]time.Duration   // testName -> duration
+	mu     sync.RWMutex
+	ranges map[string][]coverageRange // keyed by normalized file path
 }
 
 // NewMemoryTestIndex creates a new in-memory test coverage index.
 func NewMemoryTestIndex() *MemoryTestIndex {
 	return &MemoryTestIndex{
-		ranges:    make(map[string][]coverageRange),
-		durations: make(map[string]time.Duration),
+		ranges: make(map[string][]coverageRange),
 	}
 }
 
@@ -85,39 +82,9 @@ func (idx *MemoryTestIndex) AddCoverage(file string, startLine, endLine int, tes
 	}
 }
 
-// SetTestDuration records the baseline duration of a specific test.
-func (idx *MemoryTestIndex) SetTestDuration(testName string, d time.Duration) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	if idx.durations == nil {
-		idx.durations = make(map[string]time.Duration)
-	}
-	idx.durations[testName] = d
-}
-
-// GetTestDuration retrieves the recorded duration of a specific test.
-func (idx *MemoryTestIndex) GetTestDuration(testName string) time.Duration {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	if idx.durations == nil {
-		return 0
-	}
-	return idx.durations[testName]
-}
-
-// GetExpectedDuration returns the summed baseline duration of all tests covering the line.
-func (idx *MemoryTestIndex) GetExpectedDuration(file string, line int) time.Duration {
-	tests := idx.GetCoveringTests(file, line)
-	if len(tests) == 0 {
-		return 0
-	}
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	var total time.Duration
-	for _, t := range tests {
-		total += idx.durations[t]
-	}
-	return total
+// IsCovered reports whether at least one test covers the specified line in the file.
+func (idx *MemoryTestIndex) IsCovered(file string, line int) bool {
+	return len(idx.GetCoveringTests(file, line)) > 0
 }
 
 // GetCoveringTests returns all unique test and subtest names that cover the given line.
@@ -234,112 +201,99 @@ func BuildRunFilter(tests []string) string {
 	return "^(" + strings.Join(parents, "|") + ")$"
 }
 
-// CalculateAdaptiveTimeout computes a dynamic timeout budget based on baseline test duration.
-// Formula: max(1.5s, 3.0 * expectedDuration + 0.5s), capped by userTimeout.
-func CalculateAdaptiveTimeout(expectedDuration time.Duration, userTimeout time.Duration) time.Duration {
-	if expectedDuration <= 0 {
-		return userTimeout
-	}
-
-	const (
-		floorTime      = 1500 * time.Millisecond
-		scaleFactor    = 3.0
-		overheadMargin = 500 * time.Millisecond
-	)
-
-	dynamic := max(time.Duration(float64(expectedDuration)*scaleFactor)+overheadMargin, floorTime)
-	if userTimeout > 0 && dynamic > userTimeout {
-		return userTimeout
-	}
-	return dynamic
-}
-
-// LoadTestIndex loads coverage data from a SQLite database file at dbPath.
-func LoadTestIndex(dbPath string) (TestIndex, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-	defer db.Close()
-
-	return LoadTestIndexFromDB(db)
-}
-
-// LoadTestIndexFromDB loads coverage data and test durations from an open SQLite database connection.
-func LoadTestIndexFromDB(db *sql.DB) (TestIndex, error) {
-	var tableName string
-	err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='test_coverage'").Scan(&tableName)
-	if err != nil {
-		return NewMemoryTestIndex(), nil
-	}
-
-	// Inspect columns to support both (start_line, end_line) and (line) schemas
-	rowsInfo, err := db.Query("PRAGMA table_info(test_coverage)")
-	if err != nil {
-		return nil, fmt.Errorf("failed to inspect test_coverage table: %w", err)
-	}
-	defer rowsInfo.Close()
-
-	hasStartLine := false
-	hasEndLine := false
-	hasLine := false
-	for rowsInfo.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dfltValue sql.NullString
-		if err := rowsInfo.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			return nil, fmt.Errorf("failed to scan pragma table_info: %w", err)
-		}
-		switch strings.ToLower(name) {
-		case "start_line":
-			hasStartLine = true
-		case "end_line":
-			hasEndLine = true
-		case "line":
-			hasLine = true
-		}
-	}
-
-	var query string
-	if hasStartLine && hasEndLine {
-		query = "SELECT file, start_line, end_line, test_name FROM test_coverage"
-	} else if hasLine {
-		query = "SELECT file, line, line, test_name FROM test_coverage"
-	} else {
-		return NewMemoryTestIndex(), nil
-	}
-
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query test_coverage: %w", err)
-	}
-	defer rows.Close()
-
+// BuildCoverageIndex profiles tests across the specified targets to map which tests cover which source lines.
+// It compiles the test binary for each target package once, then runs individual tests with coverage profiling,
+// indexing all statement-level coverage into a MemoryTestIndex.
+func BuildCoverageIndex(ctx context.Context, targets []PackageTarget, workers int, tempDir string, verbose bool) (*MemoryTestIndex, error) {
 	index := NewMemoryTestIndex()
-	for rows.Next() {
-		var file, testName string
-		var startLine, endLine int
-		if err := rows.Scan(&file, &startLine, &endLine, &testName); err != nil {
-			return nil, fmt.Errorf("failed to scan test_coverage row: %w", err)
-		}
-		index.AddCoverage(file, startLine, endLine, testName)
+	if workers <= 0 {
+		workers = runtime.NumCPU()
 	}
 
-	// Load test durations from all_tests if table exists
-	var allTestsTable string
-	_ = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='all_tests'").Scan(&allTestsTable)
-	if allTestsTable != "" {
-		dRows, err := db.Query("SELECT test, elapsed FROM all_tests WHERE elapsed IS NOT NULL AND test != ''")
-		if err == nil {
-			defer dRows.Close()
-			for dRows.Next() {
-				var tName string
-				var elapsed float64
-				if err := dRows.Scan(&tName, &elapsed); err == nil {
-					index.SetTestDuration(tName, time.Duration(elapsed*float64(time.Second)))
-				}
+	for targetIdx, target := range targets {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		tests, err := DiscoverTests(target.Dir)
+		if err != nil || len(tests) == 0 {
+			continue
+		}
+
+		testBin := filepath.Join(tempDir, fmt.Sprintf("test_pkg_%d.bin", targetIdx))
+		if runtime.GOOS == "windows" {
+			testBin += ".exe"
+		}
+
+		// Compile test binary with coverage enabled
+		buildCmd := exec.CommandContext(ctx, "go", "test", "-c", "-coverpkg=./...", "-o", testBin, ".")
+		buildCmd.Dir = target.Dir
+		if _, err := buildCmd.CombinedOutput(); err != nil {
+			// Fall back to -cover if -coverpkg=./... fails
+			fallbackCmd := exec.CommandContext(ctx, "go", "test", "-c", "-cover", "-o", testBin, ".")
+			fallbackCmd.Dir = target.Dir
+			if out2, err2 := fallbackCmd.CombinedOutput(); err2 != nil {
+				return nil, fmt.Errorf("failed to compile tests in %s: %s\n%s", target.Dir, err2, out2)
 			}
+		}
+		defer func(bin string) { _ = os.Remove(bin) }(testBin)
+
+		type testJob struct {
+			testName string
+			index    int
+		}
+		jobChan := make(chan testJob, len(tests))
+		for i, t := range tests {
+			jobChan <- testJob{testName: t, index: i}
+		}
+		close(jobChan)
+
+		numWorkers := min(workers, len(tests))
+		var wg sync.WaitGroup
+		var errMu sync.Mutex
+		var firstErr error
+
+		for w := 0; w < numWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for job := range jobChan {
+					if ctx.Err() != nil {
+						return
+					}
+
+					covFile := filepath.Join(tempDir, fmt.Sprintf("cov_%d_%d.out", targetIdx, job.index))
+					runCmd := exec.CommandContext(ctx, testBin, "-test.run", "^"+regexp.QuoteMeta(job.testName)+"$", "-test.coverprofile="+covFile)
+					runCmd.Dir = target.Dir
+					out, err := runCmd.CombinedOutput()
+					if err != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("baseline test %q failed in %s: %s\n%s", job.testName, target.Dir, err, out)
+						}
+						errMu.Unlock()
+						_ = os.Remove(covFile)
+						return
+					}
+
+					cov, err := LoadCoverage(covFile)
+					_ = os.Remove(covFile)
+					if err != nil {
+						continue
+					}
+
+					for file, blocks := range cov.Blocks {
+						for _, b := range blocks {
+							index.AddCoverage(file, b.StartLine, b.EndLine, job.testName)
+						}
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		if firstErr != nil {
+			return nil, firstErr
 		}
 	}
 

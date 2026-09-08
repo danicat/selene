@@ -3,7 +3,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 build:
-	@go build -ldflags "-s -w -X main.version=$(VERSION)" -o bin/selene ./cmd/selene
+	@go build -ldflags "-s -w -X main.version=$(VERSION)" -o bin/selene .
 
 test:
 	@go test -v ./...
